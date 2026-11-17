@@ -5,14 +5,24 @@ Rules for any agent or contributor working in this repository (Codegeist 2026 Ha
 ## Platform
 
 - Target: **Atlassian Forge** — apps are defined by `manifest.yml` and run on the Node.js runtime.
-- Node.js 20+ is required (22.x / 24.x LTS recommended).
-- Forge CLI is installed globally (`@forge/cli`); use `forge` for all platform operations.
+- Runtime: **Node.js 24.x LTS** (`v24.22.3`) via `nvm`, installed user-locally at `$HOME/.nvm` (`/usr/local/nvm` is root-owned and must not be modified). `~/.bashrc` and `~/.profile` source `nvm.sh`, so `node --version` resolves to `v24.x.x` in new shells.
+- Forge CLI: **`@forge/cli@15.1.0`**, installed globally into the active nvm Node tree. Other Node majors make the CLI print an `Unsupported Node.js versions` warning — stay on 24.x.
+- Use `forge` for all platform operations.
+
+## Environment
+
+- Provisioned Atlassian development site: **https://one-atlas-deuz.atlassian.net**
+  - Site name: `one-atlas-deuz`
+  - Status: `active`
+  - Expires: **2027-02-15**
+- `forge site provision` is idempotent: it reports the existing demo site, or provisions one asynchronously (re-run it to poll until a site URL and expiry appear).
 
 ## Authentication (non-interactive)
 
-- Authenticate with the environment variables `FORGE_EMAIL` and `FORGE_API_TOKEN`. Never run interactive `forge login` in automation.
-- Local values live in `.env` (untracked). `.env.example` holds placeholders only.
-- **Never log, echo, print, or commit tokens.** Do not paste token values into code, docs, commit messages, or CI logs.
+- Credentials are managed as **Freebuff Project Secrets**: `FORGE_EMAIL` and `FORGE_API_TOKEN`, injected into commands as environment variables.
+- **No `.env` file is required, and none is kept on disk.** `.env` stays git-ignored as a safety net; `.env.example` documents the placeholder names only.
+- `forge login` cannot store a session in this container (no libsecret keychain). Forge CLI authenticates straight from the two environment variables, which is the documented fallback — no login step is needed.
+- **Never echo, print, `printenv`, `env`, or shell-expand `FORGE_API_TOKEN`** — not in commands, logs, docs, commit messages, or CI output. Reference it only as `"$FORGE_API_TOKEN"` inside a command that consumes it, and never print a variable-presence check that expands its value.
 
 ## Verification loop before any commit
 
