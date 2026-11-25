@@ -13,6 +13,7 @@ import type {
 } from './types';
 
 interface JiraIssuePayload {
+  id: string;
   key: string;
   fields: {
     summary?: string;
@@ -139,6 +140,27 @@ interface AdrDiscovery {
   warnings: string[];
 }
 
+/**
+ * Re-reads one ADR page and re-extracts its guardrail rules.
+ * Used by the Confluence byline's "Re-evaluate" action to detect ADR edits made
+ * after the governed issues were last verified.
+ */
+export async function fetchAdrRulesForPage(
+  pageId: string,
+): Promise<{ pageId: string; pageTitle: string; rules: ConfluenceAdrRule[] }> {
+  const page = await requestConfluenceJson<ConfluencePagePayload>(
+    route`/wiki/api/v2/pages/${pageId}?body-format=storage`,
+  );
+  const pageTitle = page.title ?? `Page ${pageId}`;
+  const pageUrl = page._links?.webui ? `${page._links.base ?? ''}${page._links.webui}` : undefined;
+
+  return {
+    pageId,
+    pageTitle,
+    rules: extractAdrRules(page.body?.storage?.value ?? '', { pageId, pageTitle, pageUrl }),
+  };
+}
+
 async function discoverAdrRules(issueKey: string, remoteLinks: string[]): Promise<AdrDiscovery> {
   const warnings: string[] = [];
   const rules: ConfluenceAdrRule[] = [];
@@ -190,65 +212,68 @@ async function discoverAdrRules(issueKey: string, remoteLinks: string[]): Promis
   return { rules, warnings };
 }
 
-interface GraphTraversal {
-  dependencies: GraphDependency[];
-  source: SpecContextBundle['graphSource'];
+interface GraphImpact {
+  connected: boolean;
+  linkedPullRequests?: number;
   warning?: string;
 }
 
 /**
- * Teamwork Graph traversal. The graph gateway is queried optimistically; on any failure we
- * degrade to Jira issue links and record a warning rather than failing the bundle.
+ * Teamwork Graph impact evidence.
+ *
+ * Teamwork Graph has no curated query for issue-to-issue links (that needs a registered
+ * Cypher query), so issue dependencies come from Jira issue links and the graph contributes
+ * the blast-radius signal it does expose: pull requests linked to this work item.
+ *
+ * The query selects only `__typename` so it stays valid regardless of the concrete union
+ * member. Any failure degrades the bundle instead of failing it.
  */
-async function traverseGraph(issueKey: string): Promise<GraphTraversal> {
-  const query = {
-    query: `query SpecGuardDependencies($key: String!) {
-      jira { issue(key: $key) { key links { relationship relatedIssue { key summary status } } } }
-    }`,
-    variables: { key: issueKey },
-  };
+async function traverseGraph(issueId: string | undefined, cloudId: string | undefined): Promise<GraphImpact> {
+  if (!cloudId) {
+    return {
+      connected: false,
+      warning:
+        'Teamwork Graph traversal was skipped because the cloud ID is unavailable in this context; dependency impact comes from Jira issue links.',
+    };
+  }
+
+  const query = `query SpecGuardImpact($id: ID!) {
+    jiraWorkItemLinkedExternalPullRequests(id: $id, first: 25) {
+      edges { node { __typename } }
+      pageInfo { hasNextPage }
+    }
+  }`;
 
   try {
-    const data = await requestJiraJson<{
-      data?: {
-        jira?: {
-          issue?: {
-            links?: Array<{
-              relationship?: string;
-              relatedIssue?: { key?: string; summary?: string; status?: string };
-            }>;
-          };
-        };
-      };
-    }>(route`/gateway/api/graphql`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(query),
+    const response = await api.asUser().requestTeamworkGraph(query, {
+      id: `ari:cloud:jira:${cloudId}:issue/${issueId ?? ''}`,
     });
 
-    const links = data.data?.jira?.issue?.links ?? [];
-    const dependencies: GraphDependency[] = links
-      .filter((link) => Boolean(link.relatedIssue?.key))
-      .map((link) => ({
-        key: link.relatedIssue?.key as string,
-        relationship: link.relationship ?? 'relates to',
-        summary: link.relatedIssue?.summary ?? '',
-        status: link.relatedIssue?.status,
-        resolved: isResolvedStatus(link.relatedIssue?.status),
-      }));
-
-    if (dependencies.length > 0) {
-      return { dependencies, source: 'teamwork-graph' };
+    if (!response.ok) {
+      return {
+        connected: false,
+        warning: `Teamwork Graph request failed (${response.status}); dependency impact comes from Jira issue links.`,
+      };
     }
-    return {
-      dependencies: [],
-      source: 'teamwork-graph',
-      warning: 'Teamwork Graph returned no dependency edges for this issue.',
+
+    const payload = (await response.json()) as {
+      data?: { jiraWorkItemLinkedExternalPullRequests?: { edges?: unknown[] } };
+      errors?: Array<{ message?: string }>;
     };
+
+    const connection = payload.data?.jiraWorkItemLinkedExternalPullRequests;
+    if (!connection) {
+      const reason = payload.errors?.[0]?.message ?? 'no data returned';
+      return {
+        connected: false,
+        warning: `Teamwork Graph returned no impact data (${reason}); dependency impact comes from Jira issue links.`,
+      };
+    }
+
+    return { connected: true, linkedPullRequests: connection.edges?.length ?? 0 };
   } catch (error) {
     return {
-      dependencies: [],
-      source: 'jira-links',
+      connected: false,
       warning: `Teamwork Graph traversal degraded to Jira issue links: ${(error as Error).message}`,
     };
   }
@@ -256,8 +281,12 @@ async function traverseGraph(issueKey: string): Promise<GraphTraversal> {
 
 /**
  * Builds the Pre-Flight Context Bundle for an issue: criteria, ADR rules, dependencies.
+ * `cloudId` (from the Forge invocation context) enables the Teamwork Graph call.
  */
-export async function fetchContextBundle(issueKey: string): Promise<SpecContextBundle> {
+export async function fetchContextBundle(
+  issueKey: string,
+  options: { cloudId?: string } = {},
+): Promise<SpecContextBundle> {
   const warnings: string[] = [];
   const fields = [
     'summary',
@@ -308,13 +337,16 @@ export async function fetchContextBundle(issueKey: string): Promise<SpecContextB
   const adrDiscovery = await discoverAdrRules(issueKey, remoteLinks);
   warnings.push(...adrDiscovery.warnings);
 
-  const graph = await traverseGraph(issueKey);
+  const graph = await traverseGraph(issue.id, options.cloudId);
   if (graph.warning) warnings.push(graph.warning);
 
-  const dependencies =
-    graph.source === 'teamwork-graph' && graph.dependencies.length > 0
-      ? graph.dependencies
-      : dependenciesFromIssueLinks(issue);
+  const dependencies = dependenciesFromIssueLinks(issue);
+
+  const graphSource: SpecContextBundle['graphSource'] = graph.connected
+    ? 'teamwork-graph'
+    : dependencies.length > 0
+      ? 'jira-links'
+      : 'unavailable';
 
   return {
     issueKey,
@@ -324,6 +356,7 @@ export async function fetchContextBundle(issueKey: string): Promise<SpecContextB
     dependencies,
     warnings,
     fetchedAt: new Date().toISOString(),
-    graphSource: graph.source,
+    graphSource,
+    linkedPullRequests: graph.linkedPullRequests,
   };
 }

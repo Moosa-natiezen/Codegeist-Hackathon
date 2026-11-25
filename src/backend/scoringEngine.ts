@@ -114,6 +114,7 @@ function evaluateAdrRule(rule: ConfluenceAdrRule, tokens: Set<string>): AdrEvalu
   return {
     pageId: rule.pageId,
     pageTitle: rule.pageTitle,
+    pageUrl: rule.pageUrl,
     kind: rule.kind,
     text: rule.text,
     status,

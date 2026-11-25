@@ -15,6 +15,7 @@ export const keys = {
   latest: (issueKey: string) => `specguard:issue:${issueKey}:latest`,
   history: (issueKey: string) => `specguard:issue:${issueKey}:history`,
   bundle: (issueKey: string, bundleId: string) => `specguard:issue:${issueKey}:bundle:${bundleId}`,
+  lastBundle: (issueKey: string) => `specguard:issue:${issueKey}:last-bundle`,
   adr: (pageId: string) => `specguard:adr:${pageId}:issues`,
 } as const;
 
@@ -33,15 +34,8 @@ export interface AdrGovernanceIndex {
   updatedAt: string;
 }
 
-/** Cheap content hash (FNV-1a) — stable across identical bundles, no crypto dependency. */
-export function hashBundle(bundle: SpecContextBundle): string {
-  const payload = JSON.stringify({
-    issueKey: bundle.issueKey,
-    criteria: bundle.criteria.map((criterion) => criterion.text),
-    adrs: bundle.adrs.map((rule) => rule.text),
-    dependencies: bundle.dependencies.map((dependency) => dependency.key),
-  });
-
+/** Cheap content hash (FNV-1a) — stable across identical input, no crypto dependency. */
+export function hashText(payload: string): string {
   let hash = 0x811c9dc5;
   for (let index = 0; index < payload.length; index += 1) {
     hash ^= payload.charCodeAt(index);
@@ -50,13 +44,30 @@ export function hashBundle(bundle: SpecContextBundle): string {
   return hash.toString(16).padStart(8, '0');
 }
 
+export function hashBundle(bundle: SpecContextBundle): string {
+  return hashText(
+    JSON.stringify({
+      issueKey: bundle.issueKey,
+      criteria: bundle.criteria.map((criterion) => criterion.text),
+      adrs: bundle.adrs.map((rule) => rule.text),
+      dependencies: bundle.dependencies.map((dependency) => dependency.key),
+    }),
+  );
+}
+
 export async function saveBundle(
   bundle: SpecContextBundle,
 ): Promise<{ bundleId: string; bundleHash: string }> {
   const bundleHash = hashBundle(bundle);
   const bundleId = `${Date.parse(bundle.fetchedAt) || Date.now()}-${bundleHash}`;
   await storage.set(keys.bundle(bundle.issueKey, bundleId), { bundle, bundleHash });
+  // Pointer so the panel can paint criteria/ADRs before any verification exists.
+  await storage.set(keys.lastBundle(bundle.issueKey), bundleId);
   return { bundleId, bundleHash };
+}
+
+export async function loadLastBundleId(issueKey: string): Promise<string | null> {
+  return (await storage.get<string>(keys.lastBundle(issueKey))) ?? null;
 }
 
 export async function loadBundle(
@@ -130,4 +141,8 @@ export async function indexAdrGovernance(
 
 export async function loadAdrGovernance(pageId: string): Promise<AdrGovernanceIndex | null> {
   return (await storage.get<AdrGovernanceIndex>(keys.adr(pageId))) ?? null;
+}
+
+export async function saveAdrGovernance(index: AdrGovernanceIndex): Promise<void> {
+  await storage.set(keys.adr(index.pageId), index);
 }

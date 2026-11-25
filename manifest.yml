@@ -1,6 +1,7 @@
 app:
   runtime:
     name: nodejs24.x
+  id: ari:cloud:ecosystem::app/2dac9431-ae6d-461f-a35f-17b42a3b203e
 
 modules:
   jira:issuePanel:
@@ -10,6 +11,7 @@ modules:
       resolver:
         function: resolver
       render: native
+      icon: resource:static-icons;specguard.svg
 
   confluence:contentBylineItem:
     - key: specguard-adr-byline
@@ -24,30 +26,35 @@ modules:
   action:
     - key: specguard-get-context
       name: SpecGuard Get Context
-      description: Fetch the Pre-Flight Context Bundle (acceptance criteria, ADR guardrails, dependency impact) for a Jira issue before coding.
+      description: Fetch the Pre-Flight Context Bundle (acceptance criteria, ADR
+        guardrails, dependency impact) for a Jira issue before coding.
       actionType: specguard:get-context
       function: getContextFn
 
     - key: specguard-verify-implementation
       name: SpecGuard Verify Implementation
-      description: Score a proposed implementation from 0-100% against the stored context bundle and return drift findings.
+      description: Score a proposed implementation from 0-100% against the stored
+        context bundle and return drift findings.
       actionType: specguard:verify-implementation
       function: verifyFn
 
     - key: specguard-sync-status
       name: SpecGuard Sync Status
-      description: Post the verification verdict back to Jira as an audit comment and apply the drift label.
+      description: Post the verification verdict back to Jira as an audit comment and
+        apply the drift label.
       actionType: specguard:sync-status
       function: syncFn
 
   rovo:agent:
     - key: specguard-agent
       name: SpecGuard
-      description: Answers questions about spec alignment and architectural drift for Jira issues.
+      description: Answers questions about spec alignment and architectural drift for
+        Jira issues.
       prompt: >
-        You are SpecGuard. Answer only from stored verification records or a fresh verification.
-        Always cite the Jira issue key and Confluence ADR page you relied on, and never invent
-        acceptance criteria. If no verification exists, say so and offer to fetch context.
+        You are SpecGuard. Answer only from stored verification records or a
+        fresh verification. Always cite the Jira issue key and Confluence ADR
+        page you relied on, and never invent acceptance criteria. If no
+        verification exists, say so and offer to fetch context.
       conversationStarters:
         - Is PAY-412 still aligned with our ADRs?
         - What acceptance criteria are unmet for this issue?
@@ -80,6 +87,8 @@ resources:
     path: src/frontend/issue-panel.tsx
   - key: adr-byline
     path: src/frontend/confluence-byline.tsx
+  - key: static-icons
+    path: static/icons
 
 permissions:
   scopes:
@@ -87,5 +96,5 @@ permissions:
     - write:jira-work
     - read:confluence-content.all
     - write:confluence-content
-    - read:graph:jira
+    - read:graph:issue:jira
     - storage:app

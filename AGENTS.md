@@ -53,10 +53,17 @@ This repository builds **SpecGuard MCP**, an Atlassian Forge app that bridges AI
 | `jira:issuePanel` | "SpecGuard Status" panel: alignment score, criteria, ADRs, dependency impact, audit log, sync |
 | `confluence:contentBylineItem` | ADR byline: governed issue count + drift status |
 | `rovo:agent` | Natural-language Q&A returning structured audit cards |
-| `rovo:action` | Rovo-initiated verify/sync, same preview + idempotency rules as the panel |
+| `action` | Rovo-initiated verify/sync, same preview + idempotency rules as the panel. The `@forge/cli@15.1.0` manifest schema has no `rovo:action` module; the three tool extensions are declared under `action` and referenced by `rovo:agent.actions` and `rovo:mcp.tools`. |
 | `rovo:mcp` | MCP server exposing `specguard_get_context`, `specguard_verify_implementation`, `specguard_sync_status` |
 
-Read the relevant doc before changing a surface or a contract: shared tool schemas live in `src/mcp/schemas.ts`, and scoring weights are constants in `src/services/verification.ts`. Do not silently change a module's contract without updating `docs/`.
+Read the relevant doc before changing a surface or a contract: tool input/output validation lives in `src/backend/actions.ts`, resolver payloads shared with the UI Kit surfaces live in `src/backend/viewTypes.ts`, and scoring weights are constants in `src/backend/scoringEngine.ts`. Do not silently change a module's contract without updating `docs/`.
+
+### Registered app
+
+- App name: **SpecGuard MCP** · Developer Space: `SpecGuard Dev` (`8ad35b79-5073-44ef-a433-3db240851018`).
+- `app.id`: `ari:cloud:ecosystem::app/2dac9431-ae6d-461f-a35f-17b42a3b203e` (stored in `manifest.yml`; never replace it with a placeholder).
+- Environments created on registration: `development`, `staging`, `production`.
+- The `jira:issuePanel` icon is served from the `static-icons` resource (`static/icons/specguard.svg`).
 
 ### Required verification before every commit
 

@@ -62,6 +62,8 @@ export interface SpecContextBundle {
   fetchedAt: string;
   /** Whether Teamwork Graph traversal succeeded, or degraded to Jira links only. */
   graphSource: 'teamwork-graph' | 'jira-links' | 'unavailable';
+  /** Linked pull requests reported by the Teamwork Graph, when it responded. */
+  linkedPullRequests?: number;
 }
 
 export interface VerificationRequest {
@@ -81,6 +83,7 @@ export interface CriterionEvaluation {
 export interface AdrEvaluation {
   pageId: string;
   pageTitle: string;
+  pageUrl?: string;
   kind: RuleKind;
   text: string;
   status: AdrConformance;
