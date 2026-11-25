@@ -52,6 +52,20 @@ export interface JiraIssueSummary {
   webLinks: string[];
 }
 
+export type CloudIdSource = 'context' | 'tenant-info' | 'cache' | 'missing';
+
+/** Structured, secret-free note describing how the Teamwork Graph call went. */
+export interface GraphDiagnostics {
+  /** Whether the graph query was actually sent. */
+  attempted: boolean;
+  /** Where the cloud ID came from, so a degraded panel can say why. */
+  cloudIdSource: CloudIdSource;
+  /** Work-item ARI used for the query, when one could be built. */
+  ari?: string;
+  /** Reason the graph call was skipped or degraded. */
+  reason?: string;
+}
+
 export interface SpecContextBundle {
   issueKey: string;
   issue: JiraIssueSummary;
@@ -64,6 +78,8 @@ export interface SpecContextBundle {
   graphSource: 'teamwork-graph' | 'jira-links' | 'unavailable';
   /** Linked pull requests reported by the Teamwork Graph, when it responded. */
   linkedPullRequests?: number;
+  /** How cloud ID / graph resolution went, surfaced in the Dependency Impact block. */
+  graphDiagnostics?: GraphDiagnostics;
 }
 
 export interface VerificationRequest {

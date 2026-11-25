@@ -10,8 +10,10 @@
  *   6. Agent audit log
  *   7. One-click sync to Jira
  *
- * Status is always word + colour (WCAG 1.4.1); every colour is an Atlassian token
- * resolved by UI Kit — there are no hard-coded values in this file.
+ * The panel is ~360px wide in Jira's right-hand column: every `Inline` is set to
+ * wrap and table columns stay short so nothing overflows horizontally. Status is
+ * always word + colour (WCAG 1.4.1); every colour is an Atlassian token resolved by
+ * UI Kit — there are no hard-coded values in this file.
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import ForgeReconciler, {
@@ -33,7 +35,15 @@ import ForgeReconciler, {
   Textfield,
 } from '@forge/react';
 import type { LozengeProps } from '@forge/react';
+import PanelBoundary from './PanelBoundary';
 import { callResolver, errorMessage } from './resolverClient';
+import { useSurfaceContext } from './surfaceContext';
+import {
+  absoluteUrl,
+  graphDiagnosticNote,
+  shortVerdictLabel,
+  unverifiedHint,
+} from './viewModel';
 import type {
   GuardrailCheckResponse,
   PanelIssueState,
@@ -102,6 +112,8 @@ function verdictLabel(verdict: AlignmentVerdict): string {
 }
 
 const IssuePanel = (): React.ReactElement => {
+  const surface = useSurfaceContext();
+
   const [panel, setPanel] = useState<PanelIssueState | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -178,6 +190,30 @@ const IssuePanel = (): React.ReactElement => {
     }
   }, [load]);
 
+  // The product context resolves asynchronously; a blank panel would look broken.
+  if (!surface.ready) {
+    return (
+      <Box padding="space.100">
+        <Inline alignBlock="center" alignInline="center" grow="fill">
+          <Spinner size="medium" label="Loading SpecGuard status" />
+        </Inline>
+      </Box>
+    );
+  }
+
+  if (surface.contextLoaded && !surface.issueKey) {
+    return (
+      <Box padding="space.100">
+        <SectionMessage appearance="warning" title="Open SpecGuard from a Jira issue">
+          <Text size="small">
+            The SpecGuard status panel reads the acceptance criteria and ADRs of the issue it is
+            opened on.
+          </Text>
+        </SectionMessage>
+      </Box>
+    );
+  }
+
   const result = panel?.result ?? null;
   const bundle = panel?.bundle ?? null;
   const history = panel?.history ?? [];
@@ -229,10 +265,10 @@ const IssuePanel = (): React.ReactElement => {
     : 'No verification recorded for this issue yet.';
 
   return (
-    <Box padding="space.200">
-      <Stack space="space.200">
+    <Box padding="space.100">
+      <Stack space="space.150">
         {/* 1 — Header */}
-        <Inline space="space.100" alignBlock="center" spread="space-between">
+        <Inline space="space.100" alignBlock="center" spread="space-between" shouldWrap>
           <Heading size="small">SpecGuard Status</Heading>
           <Button appearance="subtle" onClick={() => void load()} isDisabled={loading}>
             Refresh
@@ -260,7 +296,7 @@ const IssuePanel = (): React.ReactElement => {
           <>
             {/* 1 — Verdict banner */}
             <Stack space="space.075">
-              <Inline space="space.100" alignBlock="center">
+              <Inline space="space.100" alignBlock="center" shouldWrap>
                 <Heading size="medium">{result ? `${result.score}%` : '—'}</Heading>
                 <Lozenge appearance={verdictStyle.appearance} isBold>
                   {verdictStyle.label}
@@ -296,7 +332,7 @@ const IssuePanel = (): React.ReactElement => {
                     value={files}
                     onChange={(event) => setFiles(String(event.target.value ?? ''))}
                   />
-                  <Inline space="space.100">
+                  <Inline space="space.100" shouldWrap>
                     <Button
                       appearance="primary"
                       isDisabled={busy !== null || summary.trim().length === 0}
@@ -314,7 +350,7 @@ const IssuePanel = (): React.ReactElement => {
                   </Inline>
                 </>
               ) : (
-                <Inline space="space.100">
+                <Inline space="space.100" shouldWrap>
                   <Button
                     appearance="subtle"
                     isDisabled={busy !== null}
@@ -348,7 +384,7 @@ const IssuePanel = (): React.ReactElement => {
                     return (
                       <ListItem key={criterion.id}>
                         <Stack space="space.025">
-                          <Inline space="space.075" alignBlock="center">
+                          <Inline space="space.075" alignBlock="center" shouldWrap>
                             <Lozenge appearance={style.appearance}>{style.label}</Lozenge>
                             <Text size="small" weight="medium">
                               {criterion.id}
@@ -380,12 +416,14 @@ const IssuePanel = (): React.ReactElement => {
               ) : (
                 adrs.map((rule) => {
                   const style = ADR_STYLE[rule.status];
-                  const pageHref =
+                  const pageHref = absoluteUrl(
+                    surface.siteUrl,
                     rule.pageUrl ??
-                    `/wiki/pages/viewpage.action?pageId=${encodeURIComponent(rule.pageId)}`;
+                      `/wiki/pages/viewpage.action?pageId=${encodeURIComponent(rule.pageId)}`,
+                  );
                   return (
                     <Stack key={`${rule.pageId}-${rule.kind}-${rule.text}`} space="space.025">
-                      <Inline space="space.075" alignBlock="center">
+                      <Inline space="space.075" alignBlock="center" shouldWrap>
                         <Lozenge appearance={style.appearance}>{style.label}</Lozenge>
                         <Link href={pageHref} openNewTab>
                           {rule.pageTitle}
@@ -415,6 +453,11 @@ const IssuePanel = (): React.ReactElement => {
                   </Text>
                 </SectionMessage>
               ) : null}
+              {bundle?.graphDiagnostics ? (
+                <Text size="small" color="color.text.subtlest">
+                  {graphDiagnosticNote(bundle.graphDiagnostics)}
+                </Text>
+              ) : null}
               {bundle && bundle.linkedPullRequests !== undefined ? (
                 <Text size="small" color="color.text.subtlest">
                   {`Teamwork Graph: ${bundle.linkedPullRequests} linked pull request${bundle.linkedPullRequests === 1 ? '' : 's'}`}
@@ -427,11 +470,11 @@ const IssuePanel = (): React.ReactElement => {
               ) : (
                 dependencies.map((dependency) => (
                   <Stack key={`${dependency.key}-${dependency.relationship}`} space="space.025">
-                    <Inline space="space.075" alignBlock="center">
+                    <Inline space="space.075" alignBlock="center" shouldWrap>
                       <Lozenge appearance={dependency.resolved ? 'success' : 'warning'}>
                         {dependency.resolved ? 'RESOLVED' : 'OPEN'}
                       </Lozenge>
-                      <Link href={`/browse/${dependency.key}`} openNewTab>
+                      <Link href={absoluteUrl(surface.siteUrl, `/browse/${dependency.key}`)} openNewTab>
                         {dependency.key}
                       </Link>
                       <Text size="small" color="color.text.subtlest">
@@ -459,9 +502,9 @@ const IssuePanel = (): React.ReactElement => {
                   <DynamicTable
                     head={{
                       cells: [
-                        { key: 'time', content: 'Time', width: 25 },
-                        { key: 'tool', content: 'Tool', width: 25 },
-                        { key: 'verdict', content: 'Verdict', width: 50 },
+                        { key: 'time', content: 'Time', width: 30 },
+                        { key: 'tool', content: 'Action', width: 30 },
+                        { key: 'verdict', content: 'Result', width: 40 },
                       ],
                     }}
                     rows={auditRows.map((entry) => ({
@@ -482,9 +525,16 @@ const IssuePanel = (): React.ReactElement => {
                         {
                           key: 'verdict',
                           content: entry.verdict ? (
-                            <Lozenge appearance={VERDICT_STYLE[entry.verdict].appearance}>
-                              {VERDICT_STYLE[entry.verdict].label}
-                            </Lozenge>
+                            <Inline space="space.050" alignBlock="center" shouldWrap>
+                              <Lozenge appearance={VERDICT_STYLE[entry.verdict].appearance}>
+                                {shortVerdictLabel(entry.verdict)}
+                              </Lozenge>
+                              {entry.score !== undefined ? (
+                                <Text size="small" color="color.text.subtlest">
+                                  {`${entry.score}%`}
+                                </Text>
+                              ) : null}
+                            </Inline>
                           ) : (
                             <Text size="small" color="color.text.subtlest">
                               {entry.actor}
@@ -542,7 +592,7 @@ const IssuePanel = (): React.ReactElement => {
                             : 'Apply the spec-drift label'}
                         </ListItem>
                       </List>
-                      <Inline space="space.100">
+                      <Inline space="space.100" shouldWrap>
                         <Button
                           appearance="primary"
                           isDisabled={busy !== null}
@@ -590,11 +640,7 @@ const IssuePanel = (): React.ReactElement => {
             ) : (
               <SectionMessage appearance="information" title="No verification yet">
                 <Stack space="space.050">
-                  <Text size="small">
-                    Press Get context to load the acceptance criteria and ADRs, then run a drift
-                    check with your implementation summary. Your coding agent can also call
-                    specguard_verify_implementation through MCP.
-                  </Text>
+                  <Text size="small">{unverifiedHint(bundle !== null)}</Text>
                   <Text size="small" color="color.text.subtlest">
                     Sync stays disabled until a verification exists.
                   </Text>
@@ -608,6 +654,10 @@ const IssuePanel = (): React.ReactElement => {
   );
 };
 
-ForgeReconciler.render(<IssuePanel />);
+ForgeReconciler.render(
+  <PanelBoundary surface="status panel">
+    <IssuePanel />
+  </PanelBoundary>,
+);
 
 export default IssuePanel;

@@ -5,7 +5,10 @@
  * Expanded: the governed issues with their latest alignment scores, plus a
  * re-evaluate action that flags ADR edits made after the last verification.
  *
- * Errors hide the chip (docs/DESIGN.md §4): a broken byline is worse than none.
+ * The chip always renders once the product context resolves — including for an ADR
+ * with zero governed issues and when the resolver fails (the failure becomes a
+ * "status unavailable" chip with Retry). It renders nothing only when the surface
+ * is not attached to a Confluence page at all.
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import ForgeReconciler, {
@@ -22,7 +25,10 @@ import ForgeReconciler, {
   Text,
 } from '@forge/react';
 import type { LozengeProps } from '@forge/react';
+import PanelBoundary from './PanelBoundary';
 import { callResolver, errorMessage } from './resolverClient';
+import { useSurfaceContext } from './surfaceContext';
+import { absoluteUrl, governedChipLabel, shortVerdictLabel } from './viewModel';
 import type { AdrBylineState, AdrReevaluation } from '../backend/viewTypes';
 
 type LozengeAppearance = NonNullable<LozengeProps['appearance']>;
@@ -34,17 +40,11 @@ const AGGREGATE_APPEARANCE: Record<AdrBylineState['aggregate'], LozengeAppearanc
   default: 'default',
 };
 
-const VERDICT_TEXT = {
-  ALIGNED: 'ALIGNED',
-  DRIFT_DETECTED: 'DRIFT_DETECTED',
-  BLOCKED_OR_VIOLATION: 'BLOCKED_OR_VIOLATION',
-} as const;
-
-const VERDICT_APPEARANCE: Record<keyof typeof VERDICT_TEXT, LozengeAppearance> = {
+const VERDICT_APPEARANCE = {
   ALIGNED: 'success',
   DRIFT_DETECTED: 'warning',
   BLOCKED_OR_VIOLATION: 'danger',
-};
+} as const satisfies Record<NonNullable<AdrBylineState['issues'][number]['verdict']>, LozengeAppearance>;
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'never';
@@ -64,6 +64,8 @@ function relativeTime(iso: string | null): string {
 }
 
 const ConfluenceByline = (): React.ReactElement => {
+  const surface = useSurfaceContext();
+
   const [state, setState] = useState<AdrBylineState | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [failed, setFailed] = useState<boolean>(false);
@@ -78,7 +80,7 @@ const ConfluenceByline = (): React.ReactElement => {
       setState(await callResolver<AdrBylineState>('getAdrGovernanceState'));
       setFailed(false);
     } catch {
-      // A broken byline is never rendered; the failure is logged for forge logs.
+      // The failure is logged for forge logs; the chip stays visible but neutral.
       console.error('SpecGuard byline could not load ADR governance state.');
       setFailed(true);
     } finally {
@@ -104,9 +106,12 @@ const ConfluenceByline = (): React.ReactElement => {
     }
   }, []);
 
-  if (failed) return <Inline space="space.050">{null}</Inline>;
+  // The byline is only meaningful on a Confluence page; anything else stays empty.
+  if (surface.contextLoaded && !surface.pageId) {
+    return <Inline space="space.050">{null}</Inline>;
+  }
 
-  if (loading || !state) {
+  if (!surface.ready || loading) {
     return (
       <Inline space="space.050" alignBlock="center">
         <Text size="small" weight="medium">
@@ -117,21 +122,29 @@ const ConfluenceByline = (): React.ReactElement => {
     );
   }
 
-  const governedLabel =
-    state.governedCount === 0
-      ? 'not linked'
-      : `${state.governedCount} issue${state.governedCount === 1 ? '' : 's'} governed · ${state.driftCount} drift`;
-
-  return (
-    <Stack space="space.075">
-      <Inline space="space.050" alignBlock="center">
+  if (failed || !state) {
+    return (
+      <Inline space="space.050" alignBlock="center" shouldWrap>
         <Text size="small" weight="medium">
           SpecGuard
         </Text>
-        <Text size="small" color="color.text.subtlest">
-          ·
+        <Lozenge appearance="default">status unavailable</Lozenge>
+        <Button appearance="subtle" onClick={() => void load()}>
+          Retry
+        </Button>
+      </Inline>
+    );
+  }
+
+  return (
+    <Stack space="space.075">
+      <Inline space="space.050" alignBlock="center" shouldWrap>
+        <Text size="small" weight="medium">
+          SpecGuard
         </Text>
-        <Lozenge appearance={AGGREGATE_APPEARANCE[state.aggregate]}>{governedLabel}</Lozenge>
+        <Lozenge appearance={AGGREGATE_APPEARANCE[state.aggregate]}>
+          {governedChipLabel(state)}
+        </Lozenge>
         <Button appearance="subtle" onClick={() => setExpanded((current) => !current)}>
           {expanded ? 'Hide' : 'Details'}
         </Button>
@@ -162,7 +175,7 @@ const ConfluenceByline = (): React.ReactElement => {
                     {
                       key: 'issue',
                       content: (
-                        <Link href={`/browse/${issue.key}`} openNewTab>
+                        <Link href={absoluteUrl(surface.siteUrl, `/browse/${issue.key}`)} openNewTab>
                           {issue.key}
                         </Link>
                       ),
@@ -179,10 +192,10 @@ const ConfluenceByline = (): React.ReactElement => {
                       key: 'verdict',
                       content: issue.verdict ? (
                         <Lozenge appearance={VERDICT_APPEARANCE[issue.verdict]}>
-                          {VERDICT_TEXT[issue.verdict]}
+                          {shortVerdictLabel(issue.verdict)}
                         </Lozenge>
                       ) : (
-                        <Lozenge appearance="default">UNVERIFIED</Lozenge>
+                        <Lozenge appearance="default">Unverified</Lozenge>
                       ),
                     },
                   ],
@@ -228,7 +241,7 @@ const ConfluenceByline = (): React.ReactElement => {
               </SectionMessage>
             ) : null}
 
-            <Inline space="space.100" alignBlock="center">
+            <Inline space="space.100" alignBlock="center" shouldWrap>
               <Button
                 appearance="subtle"
                 isDisabled={busy}
@@ -247,6 +260,10 @@ const ConfluenceByline = (): React.ReactElement => {
   );
 };
 
-ForgeReconciler.render(<ConfluenceByline />);
+ForgeReconciler.render(
+  <PanelBoundary surface="ADR byline">
+    <ConfluenceByline />
+  </PanelBoundary>,
+);
 
 export default ConfluenceByline;

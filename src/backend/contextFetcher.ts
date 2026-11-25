@@ -4,10 +4,13 @@
  */
 import api, { route } from '@forge/api';
 import type { RequestInit as ForgeRequestInit, Route } from '@forge/api';
+import { resolveCloudId } from './cloudId';
+import type { CloudIdResolution } from './cloudId';
 import { descriptionToText, extractAcceptanceCriteria, extractAdrRules } from './extract';
 import type {
   ConfluenceAdrRule,
   GraphDependency,
+  GraphDiagnostics,
   JiraIssueSummary,
   SpecContextBundle,
 } from './types';
@@ -212,10 +215,25 @@ async function discoverAdrRules(issueKey: string, remoteLinks: string[]): Promis
   return { rules, warnings };
 }
 
-interface GraphImpact {
+export interface GraphTraversal {
   connected: boolean;
   linkedPullRequests?: number;
-  warning?: string;
+  diagnostics: GraphDiagnostics;
+}
+
+/**
+ * Builds the work-item ARI the graph query expects, or `null` when either half is
+ * missing — an ARI with an empty cloud ID or issue ID is rejected by the graph and
+ * would otherwise look like a real, empty result.
+ */
+export function buildIssueAri(
+  cloudId: string | null | undefined,
+  issueId: string | null | undefined,
+): string | null {
+  const trimmedCloudId = typeof cloudId === 'string' ? cloudId.trim() : '';
+  const trimmedIssueId = typeof issueId === 'string' ? issueId.trim() : '';
+  if (trimmedCloudId.length === 0 || trimmedIssueId.length === 0) return null;
+  return `ari:cloud:jira:${trimmedCloudId}:issue/${trimmedIssueId}`;
 }
 
 /**
@@ -226,16 +244,41 @@ interface GraphImpact {
  * the blast-radius signal it does expose: pull requests linked to this work item.
  *
  * The query selects only `__typename` so it stays valid regardless of the concrete union
- * member. Any failure degrades the bundle instead of failing it.
+ * member. Every failure path returns structured diagnostics instead of throwing, so the
+ * panel can explain why impact is degraded.
  */
-async function traverseGraph(issueId: string | undefined, cloudId: string | undefined): Promise<GraphImpact> {
-  if (!cloudId) {
+export async function traverseGraph(
+  issueId: string | null | undefined,
+  resolution: CloudIdResolution,
+): Promise<GraphTraversal> {
+  const diagnostics: GraphDiagnostics = {
+    attempted: false,
+    cloudIdSource: resolution.source,
+  };
+
+  if (!resolution.cloudId) {
     return {
       connected: false,
-      warning:
-        'Teamwork Graph traversal was skipped because the cloud ID is unavailable in this context; dependency impact comes from Jira issue links.',
+      diagnostics: {
+        ...diagnostics,
+        reason: 'cloud ID is unavailable, so the work-item ARI cannot be built',
+      },
     };
   }
+
+  const ari = buildIssueAri(resolution.cloudId, issueId);
+  if (!ari) {
+    return {
+      connected: false,
+      diagnostics: {
+        ...diagnostics,
+        reason: 'issue ID is unavailable, so the work-item ARI cannot be built',
+      },
+    };
+  }
+
+  diagnostics.attempted = true;
+  diagnostics.ari = ari;
 
   const query = `query SpecGuardImpact($id: ID!) {
     jiraWorkItemLinkedExternalPullRequests(id: $id, first: 25) {
@@ -245,36 +288,40 @@ async function traverseGraph(issueId: string | undefined, cloudId: string | unde
   }`;
 
   try {
-    const response = await api.asUser().requestTeamworkGraph(query, {
-      id: `ari:cloud:jira:${cloudId}:issue/${issueId ?? ''}`,
-    });
+    const response = await api.asUser().requestTeamworkGraph(query, { id: ari });
 
     if (!response.ok) {
       return {
         connected: false,
-        warning: `Teamwork Graph request failed (${response.status}); dependency impact comes from Jira issue links.`,
+        diagnostics: { ...diagnostics, reason: `request failed with HTTP ${response.status}` },
       };
     }
 
     const payload = (await response.json()) as {
-      data?: { jiraWorkItemLinkedExternalPullRequests?: { edges?: unknown[] } };
+      data?: { jiraWorkItemLinkedExternalPullRequests?: { edges?: unknown[] } | null };
       errors?: Array<{ message?: string }>;
     };
 
     const connection = payload.data?.jiraWorkItemLinkedExternalPullRequests;
     if (!connection) {
-      const reason = payload.errors?.[0]?.message ?? 'no data returned';
       return {
         connected: false,
-        warning: `Teamwork Graph returned no impact data (${reason}); dependency impact comes from Jira issue links.`,
+        diagnostics: {
+          ...diagnostics,
+          reason: payload.errors?.[0]?.message ?? 'no impact data was returned',
+        },
       };
     }
 
-    return { connected: true, linkedPullRequests: connection.edges?.length ?? 0 };
+    return {
+      connected: true,
+      linkedPullRequests: connection.edges?.length ?? 0,
+      diagnostics,
+    };
   } catch (error) {
     return {
       connected: false,
-      warning: `Teamwork Graph traversal degraded to Jira issue links: ${(error as Error).message}`,
+      diagnostics: { ...diagnostics, reason: (error as Error).message },
     };
   }
 }
@@ -337,8 +384,13 @@ export async function fetchContextBundle(
   const adrDiscovery = await discoverAdrRules(issueKey, remoteLinks);
   warnings.push(...adrDiscovery.warnings);
 
-  const graph = await traverseGraph(issue.id, options.cloudId);
-  if (graph.warning) warnings.push(graph.warning);
+  const resolution = await resolveCloudId(options.cloudId);
+  const graph = await traverseGraph(issue.id, resolution);
+  if (!graph.connected) {
+    warnings.push(
+      `Teamwork Graph unavailable (${graph.diagnostics.reason ?? 'unknown reason'}); dependency impact comes from Jira issue links.`,
+    );
+  }
 
   const dependencies = dependenciesFromIssueLinks(issue);
 
@@ -358,5 +410,6 @@ export async function fetchContextBundle(
     fetchedAt: new Date().toISOString(),
     graphSource,
     linkedPullRequests: graph.linkedPullRequests,
+    graphDiagnostics: graph.diagnostics,
   };
 }

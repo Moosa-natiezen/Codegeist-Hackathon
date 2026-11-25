@@ -79,8 +79,16 @@ export function buildInstructions(bundle: SpecContextBundle): string {
   return lines.join(' ');
 }
 
-/** specguard_get_context */
-export async function getContext(input: GetContextInput): Promise<ToolResult<GetContextOutput>> {
+/**
+ * specguard_get_context
+ *
+ * `cloudId` comes from the Rovo action / MCP invocation context; when it is absent
+ * the bundle resolves one itself, so the graph is not silently skipped.
+ */
+export async function getContext(
+  input: GetContextInput,
+  cloudId?: string,
+): Promise<ToolResult<GetContextOutput>> {
   const issueKey = readIssueKey(input.issueKey);
   if (!issueKey) {
     return {
@@ -91,7 +99,7 @@ export async function getContext(input: GetContextInput): Promise<ToolResult<Get
   }
 
   try {
-    const bundle = await fetchContextBundle(issueKey);
+    const bundle = await fetchContextBundle(issueKey, { cloudId });
     const { bundleId, bundleHash } = await saveBundle(bundle);
     const actor = readString(input.agentSource) ?? 'specguard-mcp';
 
@@ -120,6 +128,7 @@ export async function getContext(input: GetContextInput): Promise<ToolResult<Get
 /** specguard_verify_implementation */
 export async function verifyImplementation(
   input: VerifyInput,
+  cloudId?: string,
 ): Promise<ToolResult<VerificationResult>> {
   const issueKey = readIssueKey(input.issueKey);
   const summary = readString(input.implementationSummary);
@@ -162,7 +171,7 @@ export async function verifyImplementation(
       bundle = stored.bundle;
       bundleHash = stored.bundleHash;
     } else {
-      bundle = await fetchContextBundle(issueKey);
+      bundle = await fetchContextBundle(issueKey, { cloudId });
       const saved = await saveBundle(bundle);
       bundleId = saved.bundleId;
       bundleHash = saved.bundleHash;
