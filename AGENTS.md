@@ -37,3 +37,32 @@ Rules for any agent or contributor working in this repository (Codegeist 2026 Ha
 - Commit with [Conventional Commits](https://www.conventionalcommits.org/) messages, e.g. `feat(app): add Jira issue panel`, `chore(setup): ...`, `fix(lint): ...`.
 - Push to the remote repository after verification.
 - Never leak `.env` files or tokens: they stay untracked, and no secret is ever committed.
+
+## Project Architecture (SpecGuard MCP)
+
+This repository builds **SpecGuard MCP**, an Atlassian Forge app that bridges AI coding agents with Jira acceptance criteria, Confluence ADRs, and Teamwork Graph context. The locked architecture lives in:
+
+- [`docs/PRD.md`](docs/PRD.md) — product scope, target tracks, features, requirements, success metrics.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — UI Kit surfaces (`jira:issuePanel`, `confluence:contentBylineItem`, Rovo cards), states, accessibility, budgets.
+- [`docs/TECH_STACK.md`](docs/TECH_STACK.md) — Forge modules, source layout, KVS data model, tool contracts, scopes, deployment.
+
+### Target Forge modules
+
+| Module | Purpose |
+|---|---|
+| `jira:issuePanel` | "SpecGuard Status" panel: alignment score, criteria, ADRs, dependency impact, audit log, sync |
+| `confluence:contentBylineItem` | ADR byline: governed issue count + drift status |
+| `rovo:agent` | Natural-language Q&A returning structured audit cards |
+| `rovo:action` | Rovo-initiated verify/sync, same preview + idempotency rules as the panel |
+| `rovo:mcp` | MCP server exposing `specguard_get_context`, `specguard_verify_implementation`, `specguard_sync_status` |
+
+Read the relevant doc before changing a surface or a contract: shared tool schemas live in `src/mcp/schemas.ts`, and scoring weights are constants in `src/services/verification.ts`. Do not silently change a module's contract without updating `docs/`.
+
+### Required verification before every commit
+
+Both of these must pass, in addition to the secret checks above:
+
+1. `npx tsc --noEmit` — TypeScript strict type check.
+2. `forge lint` — Forge platform and manifest rules.
+
+Fix reported issues rather than suppressing them. The existing rules still apply unchanged: Node 24.x LTS, `@forge/cli@15.1.0`, Freebuff Project Secrets for `FORGE_EMAIL` / `FORGE_API_TOKEN`, and **never log, echo, print, or commit credentials**.
