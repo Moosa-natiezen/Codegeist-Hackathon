@@ -42,6 +42,20 @@ export function adfToText(node: unknown): string {
     }
     if (!Array.isArray(n.content)) return;
     for (const child of n.content) {
+      // Jira checklist items carry their state in `attrs.state`, not as text, so
+      // render them as checkboxes — otherwise task lists are invisible to the
+      // acceptance-criteria parser.
+      if (child?.type === 'taskItem') {
+        const buffer: string[] = [];
+        walk(child, buffer);
+        const itemText = buffer.join('').trim();
+        if (itemText.length > 0) {
+          const done = String(child.attrs?.state ?? '').toUpperCase() === 'DONE';
+          lines.push(`- [${done ? 'x' : ' '}] ${itemText}`);
+        }
+        continue;
+      }
+
       const isBlock = child?.type ? BLOCK_TYPES.has(child.type) : false;
       if (isBlock) {
         const buffer: string[] = [];

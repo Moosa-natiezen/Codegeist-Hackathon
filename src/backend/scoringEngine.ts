@@ -31,6 +31,31 @@ export const WEIGHTS = { criteria: 50, adrs: 35, impact: 15 } as const;
 export const ALIGNED_THRESHOLD = 85;
 export const DRIFT_THRESHOLD = 50;
 
+/** Error code returned when an issue has nothing to score against. */
+export const NO_SPECS_ERROR_CODE = 'NO_SPECS_TO_VERIFY';
+
+export const NO_SPECS_MESSAGE =
+  'No acceptance criteria or linked Confluence ADRs found. Add a checklist to the issue description or link an ADR page, then press Get context.';
+
+/**
+ * Whether a bundle has anything worth scoring. An issue with no criteria and no
+ * ADR rules would otherwise score a misleading `0% BLOCKED_OR_VIOLATION` merely
+ * because the spec was never authored.
+ */
+export function hasScorableSpec(bundle: Pick<SpecContextBundle, 'criteria' | 'adrs'>): boolean {
+  return bundle.criteria.length > 0 || bundle.adrs.length > 0;
+}
+
+/** Raised when scoring is attempted for an issue with no criteria and no ADRs. */
+export class EmptySpecError extends Error {
+  readonly errorCode = NO_SPECS_ERROR_CODE;
+
+  constructor() {
+    super(NO_SPECS_MESSAGE);
+    this.name = 'EmptySpecError';
+  }
+}
+
 const MET_RATIO = 0.6;
 const PARTIAL_RATIO = 0.3;
 const ADR_MATCH_RATIO = 0.5;

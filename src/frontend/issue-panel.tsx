@@ -159,6 +159,8 @@ const IssuePanel = (): React.ReactElement => {
                   .map((file) => file.trim())
                   .filter((file) => file.length > 0)
               : [],
+          // Resolver contexts may not carry a cloud ID; forward the one the bridge gave us.
+          cloudId: surface.cloudId ?? undefined,
         });
         if (mode === 'verify') {
           setShowCheck(false);
@@ -172,7 +174,7 @@ const IssuePanel = (): React.ReactElement => {
         setBusy(null);
       }
     },
-    [files, load, summary],
+    [files, load, summary, surface.cloudId],
   );
 
   const applySync = useCallback(async (): Promise<void> => {
@@ -253,6 +255,10 @@ const IssuePanel = (): React.ReactElement => {
           : `${dependency.relationship}: ${dependency.summary}`,
       }));
 
+  // Scoring needs criteria or ADR guardrails; with neither, a run would report a
+  // misleading 0% block, so the submit button stays disabled.
+  const specsAvailable = criteria.length > 0 || adrs.length > 0;
+
   const metCount = criteria.filter((criterion) => criterion.status === 'met').length;
   const consideredCount = criteria.filter(
     (criterion) => criterion.status !== 'not_verifiable',
@@ -332,10 +338,17 @@ const IssuePanel = (): React.ReactElement => {
                     value={files}
                     onChange={(event) => setFiles(String(event.target.value ?? ''))}
                   />
+                  {!specsAvailable ? (
+                    <Text size="small" color="color.text.subtlest">
+                      This issue has no acceptance criteria and no linked ADR, so there is nothing to
+                      score. Add a checklist to the description or link an ADR page, then press Get
+                      context.
+                    </Text>
+                  ) : null}
                   <Inline space="space.100" shouldWrap>
                     <Button
                       appearance="primary"
-                      isDisabled={busy !== null || summary.trim().length === 0}
+                      isDisabled={busy !== null || summary.trim().length === 0 || !specsAvailable}
                       onClick={() => void runCheck('verify')}
                     >
                       Run guardrail check

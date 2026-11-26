@@ -6,7 +6,7 @@
  */
 import Resolver from '@forge/resolver';
 import { fetchAdrRulesForPage, fetchContextBundle } from './contextFetcher';
-import { scoreImplementation } from './scoringEngine';
+import { hasScorableSpec, NO_SPECS_MESSAGE, scoreImplementation } from './scoringEngine';
 import {
   appendAudit,
   hashText,
@@ -127,12 +127,16 @@ export async function runGuardrailCheck({
   payload,
 }: ResolverRequest<GuardrailCheckPayload>): Promise<GuardrailCheckResponse> {
   const issueKey = issueKeyFrom(context);
-  const bundle = await fetchContextBundle(issueKey, { cloudId: context.cloudId });
+  // Resolver contexts do not always carry a cloud ID; the panel forwards the one
+  // it read from `useProductContext()`.
+  const bundle = await fetchContextBundle(issueKey, {
+    cloudId: payload?.cloudId ?? context.cloudId,
+  });
   const saved = await saveBundle(bundle);
   const summary = (payload?.implementationSummary ?? '').trim();
   const mode = payload?.mode ?? 'verify';
 
-  if (mode === 'context' || summary.length === 0) {
+  const recordContextFetch = async (): Promise<void> => {
     await appendAudit({
       id: `${Date.now()}-panel-context`,
       issueKey,
@@ -141,6 +145,10 @@ export async function runGuardrailCheck({
       detail: `${bundle.criteria.length} criteria · ${bundle.adrs.length} ADR rules · ${bundle.dependencies.length} dependencies`,
       timestamp: new Date().toISOString(),
     });
+  };
+
+  if (mode === 'context' || summary.length === 0) {
+    await recordContextFetch();
 
     return {
       issueKey,
@@ -150,6 +158,13 @@ export async function runGuardrailCheck({
       result: null,
       warnings: bundle.warnings,
     };
+  }
+
+  // An issue with no criteria and no ADRs has nothing to score against: refuse
+  // instead of reporting a misleading 0% BLOCKED_OR_VIOLATION.
+  if (!hasScorableSpec(bundle)) {
+    await recordContextFetch();
+    throw new Error(NO_SPECS_MESSAGE);
   }
 
   const result = scoreImplementation(bundle, {

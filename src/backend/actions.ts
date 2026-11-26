@@ -3,7 +3,12 @@
  * Input validation and error shaping live here so both surfaces behave identically.
  */
 import { fetchContextBundle } from './contextFetcher';
-import { scoreImplementation } from './scoringEngine';
+import {
+  hasScorableSpec,
+  NO_SPECS_ERROR_CODE,
+  NO_SPECS_MESSAGE,
+  scoreImplementation,
+} from './scoringEngine';
 import {
   appendAudit,
   hashBundle,
@@ -175,6 +180,11 @@ export async function verifyImplementation(
       const saved = await saveBundle(bundle);
       bundleId = saved.bundleId;
       bundleHash = saved.bundleHash;
+    }
+
+    // Nothing to score against: refuse instead of returning a misleading 0% block.
+    if (!hasScorableSpec(bundle)) {
+      return { ok: false, errorCode: NO_SPECS_ERROR_CODE, message: NO_SPECS_MESSAGE };
     }
 
     const result = scoreImplementation(bundle, request);

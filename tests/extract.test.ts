@@ -118,6 +118,19 @@ describe('extractAdrRules', () => {
   });
 });
 
+describe('Jira checklist ADF', () => {
+  it('parses taskList / taskItem nodes into acceptance criteria with checkbox state', () => {
+    const criteria = extractAcceptanceCriteria(descriptionToText(adfDoc));
+
+    expect(criteria.map((criterion) => criterion.text)).toEqual([
+      'Retry the sync on HTTP 429',
+      'Emit an audit log entry for every sync',
+    ]);
+    expect(criteria[0].checkedInJira).toBe(false);
+    expect(criteria[1].checkedInJira).toBe(true);
+  });
+});
+
 describe('tokenize', () => {
   it('drops stop words and short tokens', () => {
     expect(tokenize('The panel must show an alignment score')).toEqual([

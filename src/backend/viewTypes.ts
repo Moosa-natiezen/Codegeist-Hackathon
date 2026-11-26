@@ -29,6 +29,8 @@ export interface GuardrailCheckPayload {
   mode?: 'context' | 'verify';
   implementationSummary?: string;
   changedFiles?: string[];
+  /** `cloudId` from `useProductContext()`; resolver contexts do not always carry one. */
+  cloudId?: string;
 }
 
 export interface GuardrailCheckResponse {

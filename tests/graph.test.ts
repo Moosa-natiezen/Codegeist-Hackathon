@@ -61,6 +61,30 @@ describe('cloudId extraction', () => {
     expect(readCloudId('ari:cloud:jira::site/x')).toBeNull();
   });
 
+  it('extracts the tenant UUID from a UI Kit 2 installContext ARI', () => {
+    expect(
+      readCloudId({ installContext: 'ari:cloud:jira::site/2dac9431-ae6d-461f-a35f-17b42a3b203e' }),
+    ).toBe('2dac9431-ae6d-461f-a35f-17b42a3b203e');
+    expect(
+      readCloudId({
+        installContext: 'ari:cloud:confluence::site/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0',
+        siteUrl: 'https://one-atlas-deuz.atlassian.net',
+      }),
+    ).toBe('0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0');
+    expect(readCloudId({ installContext: 'ari:cloud:jira::site/not-a-uuid' })).toBeNull();
+  });
+
+  it('reads extension.cloudId and a cloudId forwarded by the panel', async () => {
+    expect(
+      readCloudId({ extension: { cloudId: 'extension-cloud', issue: { key: 'PAY-412' } } }),
+    ).toBe('extension-cloud');
+
+    const resolution = await resolveCloudId('forwarded-cloud');
+
+    expect(resolution).toMatchObject({ cloudId: 'forwarded-cloud', source: 'context' });
+    expect(forgeMocks.requestJira).not.toHaveBeenCalled();
+  });
+
   it('prefers the invocation context and never calls tenant_info when it is present', async () => {
     const resolution = await resolveCloudId({ cloudId: 'ctx-cloud' }, { cloudId: 'second-cloud' });
 

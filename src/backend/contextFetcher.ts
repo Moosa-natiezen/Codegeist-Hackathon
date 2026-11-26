@@ -37,7 +37,15 @@ interface JiraIssuePayload {
 }
 
 interface RemoteLinkPayload {
-  object?: { url?: string; title?: string };
+  object?: { url?: string; title?: string; globalId?: string };
+}
+
+/** A Jira remote link reduced to the fields that can identify a Confluence page. */
+export interface RemoteLinkRef {
+  url?: string;
+  title?: string;
+  /** Jira stores the Confluence page ID here, e.g. `appId=...&pageId=123` or a page ARI. */
+  globalId?: string;
 }
 
 export interface ConfluencePagePayload {
@@ -130,12 +138,85 @@ function isResolvedStatus(status?: string): boolean {
   return /done|closed|resolved|complete|cancelled/i.test(status);
 }
 
-function pageIdFromUrl(url: string): string | null {
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/** Decodes URL-safe base64 into bytes without depending on a global `atob`. */
+export function decodeBase64Url(value: string): number[] {
+  const characters = value.trim().replace(/=+$/, '').split('');
+  if (characters.length === 0 || characters.length % 4 === 1) return [];
+
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+
+  for (const character of characters) {
+    const index = BASE64URL_ALPHABET.indexOf(character);
+    if (index < 0) return [];
+    buffer = (buffer << 6) | index;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
+  }
+
+  return bytes;
+}
+
+/**
+ * Confluence tiny links (`/wiki/x/<key>`) encode the numeric page ID as 64-bit
+ * little-endian bytes in URL-safe base64. Decoding it recovers the page ID, so a
+ * short ADR link still resolves without an extra search round trip.
+ */
+export function decodeConfluenceTinyKey(key: string): string | null {
+  const bytes = decodeBase64Url(key);
+  if (bytes.length === 0 || bytes.length > 8) return null;
+
+  let value = 0n;
+  for (let index = bytes.length - 1; index >= 0; index -= 1) {
+    value = (value << 8n) | BigInt(bytes[index]);
+  }
+
+  return value > 0n ? value.toString() : null;
+}
+
+/** Reads a Confluence page ID from a canonical, query-string, or tiny page URL. */
+export function pageIdFromUrl(url: string): string | null {
   const byPath = /\/pages\/(\d+)/.exec(url);
   if (byPath) return byPath[1];
   const byQuery = /[?&]pageId=(\d+)/.exec(url);
   if (byQuery) return byQuery[1];
+  const byTiny = /\/x\/([A-Za-z0-9_-]+)/.exec(url);
+  if (byTiny) return decodeConfluenceTinyKey(byTiny[1]);
   return null;
+}
+
+/** Reads a Confluence page ID from a Jira remote link (globalId first, then URL). */
+export function pageIdFromRemoteLink(link: RemoteLinkRef): string | null {
+  const globalId = typeof link.globalId === 'string' ? link.globalId : '';
+  const fromGlobalId = /(?:^|[?&;,\s])pageId=(\d+)/.exec(globalId);
+  if (fromGlobalId) return fromGlobalId[1];
+  const fromAri = /:page\/(\d+)/.exec(globalId);
+  if (fromAri) return fromAri[1];
+  return typeof link.url === 'string' ? pageIdFromUrl(link.url) : null;
+}
+
+function escapeCqlTerm(term: string): string {
+  return term.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** CQL search limited to page IDs; callers degrade to a warning on failure. */
+async function searchConfluencePageIds(cql: string): Promise<string[]> {
+  const search = await requestConfluenceJson<{ results?: Array<{ content?: { id?: string } }> }>(
+    route`/wiki/rest/api/search?cql=${cql}&limit=5`,
+  );
+  return (search.results ?? [])
+    .map((result) => result.content?.id)
+    .filter((id): id is string => typeof id === 'string');
+}
+
+function looksLikeConfluenceLink(link: RemoteLinkRef): boolean {
+  return /\/wiki\b|\/confluence\b|confluence/i.test(`${link.url ?? ''} ${link.globalId ?? ''}`);
 }
 
 interface AdrDiscovery {
@@ -164,24 +245,41 @@ export async function fetchAdrRulesForPage(
   };
 }
 
-async function discoverAdrRules(issueKey: string, remoteLinks: string[]): Promise<AdrDiscovery> {
+async function discoverAdrRules(
+  issueKey: string,
+  remoteLinks: RemoteLinkRef[],
+): Promise<AdrDiscovery> {
   const warnings: string[] = [];
   const rules: ConfluenceAdrRule[] = [];
   const pageIds = new Set<string>();
+  const unresolvedTitles: string[] = [];
 
-  for (const url of remoteLinks) {
-    const id = pageIdFromUrl(url);
-    if (id) pageIds.add(id);
+  for (const link of remoteLinks) {
+    const id = pageIdFromRemoteLink(link);
+    if (id) {
+      pageIds.add(id);
+      continue;
+    }
+    // A Confluence link whose URL carries no recoverable page ID is resolved by title.
+    const title = typeof link.title === 'string' ? link.title.trim() : '';
+    if (title.length > 0 && looksLikeConfluenceLink(link)) unresolvedTitles.push(title);
+  }
+
+  for (const title of unresolvedTitles) {
+    try {
+      for (const id of await searchConfluencePageIds(`title = "${escapeCqlTerm(title)}"`)) {
+        pageIds.add(id);
+      }
+    } catch (error) {
+      warnings.push(`Confluence title search unavailable: ${(error as Error).message}`);
+    }
   }
 
   // CQL fallback: pages mentioning the issue key (label/space convention per PRD).
   if (pageIds.size === 0) {
     try {
-      const search = await requestConfluenceJson<{ results?: Array<{ content?: { id?: string } }> }>(
-        route`/wiki/rest/api/search?cql=${`text ~ "${issueKey}"`}&limit=5`,
-      );
-      for (const result of search.results ?? []) {
-        if (result.content?.id) pageIds.add(result.content.id);
+      for (const id of await searchConfluencePageIds(`text ~ "${escapeCqlTerm(issueKey)}"`)) {
+        pageIds.add(id);
       }
     } catch (error) {
       warnings.push(`Confluence ADR search unavailable: ${(error as Error).message}`);
@@ -368,15 +466,19 @@ export async function fetchContextBundle(
     warnings.push('No acceptance criteria were found in the issue description or subtasks.');
   }
 
-  let remoteLinks: string[] = [];
+  let remoteLinks: RemoteLinkRef[] = [];
   try {
     const links = await requestJiraJson<RemoteLinkPayload[]>(
       route`/rest/api/3/issue/${issueKey}/remotelink`,
     );
-    remoteLinks = links
-      .map((link) => link.object?.url)
+    remoteLinks = links.map((link) => ({
+      url: link.object?.url,
+      title: link.object?.title,
+      globalId: link.object?.globalId,
+    }));
+    issueSummary.webLinks = remoteLinks
+      .map((link) => link.url)
       .filter((url): url is string => typeof url === 'string');
-    issueSummary.webLinks = remoteLinks;
   } catch (error) {
     warnings.push(`Remote links unavailable: ${(error as Error).message}`);
   }
