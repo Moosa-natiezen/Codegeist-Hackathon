@@ -88,6 +88,17 @@ describe('Confluence page fetch fallbacks', () => {
     expect(forgeMocks.appConfluence.mock.calls[0][0]).toContain('/wiki/api/v2/pages/1001');
   });
 
+  it('turns an all-401/403 refusal into actionable sharing guidance', async () => {
+    const unauthorized = { ok: false, status: 401, json: async () => ({}) };
+    const forbidden = { ok: false, status: 403, json: async () => ({}) };
+    forgeMocks.userConfluence.mockResolvedValue(unauthorized);
+    forgeMocks.appConfluence.mockResolvedValue(forbidden);
+
+    await expect(fetchConfluencePage('5177345')).rejects.toThrow(
+      /Confluence page 5177345 is restricted \(HTTP 401\/403\)\. Open the ADR page, click Share/,
+    );
+  });
+
   it('reports every attempt when the page cannot be read at all', async () => {
     forgeMocks.userConfluence.mockResolvedValue(notFound);
     forgeMocks.appConfluence.mockResolvedValue(notFound);

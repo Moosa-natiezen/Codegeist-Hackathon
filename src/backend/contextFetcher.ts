@@ -201,6 +201,23 @@ export function pageIdFromRemoteLink(link: RemoteLinkRef): string | null {
   return typeof link.url === 'string' ? pageIdFromUrl(link.url) : null;
 }
 
+/**
+ * Raised when every read attempt for a Confluence page was refused with HTTP 401/403.
+ * The message is user-facing: it names the fix (share the page) instead of dumping
+ * the per-identity attempt list, which cannot be acted on from the panel.
+ */
+export class RestrictedConfluencePageError extends Error {
+  readonly pageId: string;
+
+  constructor(pageId: string) {
+    super(
+      `Confluence page ${pageId} is restricted (HTTP 401/403). Open the ADR page, click Share, and allow site/space view access so SpecGuard can read its rules.`,
+    );
+    this.name = 'RestrictedConfluencePageError';
+    this.pageId = pageId;
+  }
+}
+
 /** storage-format page endpoints: API v2 first, then the v1 content endpoint. */
 function confluencePageEndpoints(pageId: string): Route[] {
   return [
@@ -219,6 +236,9 @@ function confluencePageEndpoints(pageId: string): Route[] {
  */
 export async function fetchConfluencePage(pageId: string): Promise<ConfluencePagePayload> {
   const failures: string[] = [];
+  // Cleared as soon as one attempt fails for a reason other than a 401/403 refusal,
+  // so the "restricted" guidance only appears when permissions are the whole story.
+  let allRestricted = true;
 
   for (const identity of ['user', 'app'] as const) {
     for (const endpoint of confluencePageEndpoints(pageId)) {
@@ -229,12 +249,15 @@ export async function fetchConfluencePage(pageId: string): Promise<ConfluencePag
         const response = await client.requestConfluence(endpoint);
         if (response.ok) return (await response.json()) as ConfluencePagePayload;
         failures.push(`${identity} HTTP ${response.status}`);
+        if (response.status !== 401 && response.status !== 403) allRestricted = false;
       } catch (error) {
         failures.push(`${identity} ${(error as Error).message}`);
+        allRestricted = false;
       }
     }
   }
 
+  if (allRestricted) throw new RestrictedConfluencePageError(pageId);
   throw new Error(`Confluence page ${pageId} could not be read (${failures.join(', ')})`);
 }
 
@@ -366,7 +389,12 @@ async function discoverAdrRules(
         }),
       );
     } catch (error) {
-      warnings.push(`ADR page ${pageId} could not be read: ${(error as Error).message}`);
+      // A restricted page already carries actionable, user-facing guidance.
+      warnings.push(
+        error instanceof RestrictedConfluencePageError
+          ? error.message
+          : `ADR page ${pageId} could not be read: ${(error as Error).message}`,
+      );
     }
   }
 
@@ -442,7 +470,9 @@ export async function traverseGraph(
   diagnostics.attempted = true;
   diagnostics.ari = ari;
 
-  const query = `query SpecGuardImpact($id: ID!) {
+  // Atlassian validates the operation name as `[company]_[operation]` (company >= 3
+  // chars, operation >= 4), so an unnamed or CamelCase operation is rejected up front.
+  const query = `query specguard_linkedPullRequests($id: ID!) {
     jiraWorkItemLinkedExternalPullRequests(id: $id, first: 25) {
       edges { node { __typename } }
       pageInfo { hasNextPage }

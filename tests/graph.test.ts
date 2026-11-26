@@ -180,6 +180,16 @@ describe('teamwork graph traversal', () => {
     });
   });
 
+  it('names the GraphQL operation for Atlassian [company]_[operation] validation', async () => {
+    forgeMocks.requestTeamworkGraph.mockResolvedValue(jsonResponse({ data: {} }));
+
+    await traverseGraph('10001', { cloudId: 'cloud-1', source: 'context' });
+
+    const payload = forgeMocks.requestTeamworkGraph.mock.calls[0][0] as string;
+    expect(payload).toContain('query specguard_linkedPullRequests(');
+    expect(payload).toContain('$id: ID!');
+  });
+
   it('skips the query when the cloud ID is missing and records why', async () => {
     const traversal = await traverseGraph('10001', {
       cloudId: null,
