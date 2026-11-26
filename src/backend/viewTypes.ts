@@ -42,10 +42,22 @@ export interface GuardrailCheckResponse {
   warnings: string[];
 }
 
+/**
+ * Payload every UI Kit surface forwards: the `cloudId` it read from
+ * `useProductContext()` (resolver contexts do not always carry one), plus the panel's
+ * request for a live context fetch.
+ */
+export interface PanelContextPayload {
+  cloudId?: string;
+  refreshContext?: boolean;
+}
+
 /** `syncVerificationToJira` */
 export interface SyncPayload {
   postComment?: boolean;
   addDriftLabel?: boolean;
+  /** Forwarded for consistency; the sync write itself is cloud-ID agnostic. */
+  cloudId?: string;
 }
 
 export type AdrAggregate = 'success' | 'warning' | 'danger' | 'default';

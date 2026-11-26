@@ -52,7 +52,7 @@ export interface JiraIssueSummary {
   webLinks: string[];
 }
 
-export type CloudIdSource = 'context' | 'tenant-info' | 'cache' | 'missing';
+export type CloudIdSource = 'context' | 'cache' | 'missing';
 
 /** Structured, secret-free note describing how the Teamwork Graph call went. */
 export interface GraphDiagnostics {

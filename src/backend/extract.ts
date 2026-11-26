@@ -81,9 +81,49 @@ export function descriptionToText(description: unknown): string {
   return adfToText(description);
 }
 
-const CHECKBOX_DONE = /^\s*(?:[-*]\s*)?\[(x|X)\]\s*/;
-const CHECKBOX_OPEN = /^\s*(?:[-*]\s*)?\[\s?\]\s*/;
 const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+/;
+
+/** One checkbox marker. The leading whitespace belongs to the marker, not the item. */
+const CHECKBOX_TOKEN = /(?:^|\s)[-*]\s*\[([ xX])\]/g;
+const HAS_CHECKBOX = /(?:^|\s)[-*]\s*\[[ xX]\]/;
+
+interface CheckboxItem {
+  text: string;
+  checked: boolean;
+}
+
+/**
+ * Splits a single line on every checkbox marker, so a checklist authored as one
+ * paragraph line (`Acceptance Criteria: - [ ] A - [ ] B - [ ] C`) yields each item.
+ * Text before the first marker (an "Acceptance Criteria:" label) is dropped.
+ */
+function splitCheckboxLine(raw: string): CheckboxItem[] {
+  const tokens: Array<{ textStart: number; markerStart: number; checked: boolean }> = [];
+  CHECKBOX_TOKEN.lastIndex = 0;
+  let match: RegExpExecArray | null = CHECKBOX_TOKEN.exec(raw);
+  while (match !== null) {
+    tokens.push({
+      textStart: match.index + match[0].length,
+      markerStart: match.index,
+      checked: match[1].toLowerCase() === 'x',
+    });
+    match = CHECKBOX_TOKEN.exec(raw);
+  }
+
+  return tokens
+    .map((token, index) => {
+      const end = index + 1 < tokens.length ? tokens[index + 1].markerStart : raw.length;
+      return {
+        text: raw
+          .slice(token.textStart, end)
+          .replace(/^[\s\-–—*]+/, '')
+          .replace(/[\s\-–—*]+$/, '')
+          .trim(),
+        checked: token.checked,
+      };
+    })
+    .filter((item) => item.text.length > 0);
+}
 
 /**
  * Extracts acceptance criteria from description text.
@@ -110,6 +150,21 @@ export function extractAcceptanceCriteria(
     const line = raw.trim();
     if (line.length === 0) continue;
 
+    // Checkboxes are parsed before headings: one line can open with an
+    // "Acceptance Criteria:" label and still carry every item inline.
+    if (HAS_CHECKBOX.test(raw)) {
+      for (const item of splitCheckboxLine(raw)) {
+        criteria.push({
+          id: `AC-${criteria.length + 1}`,
+          text: item.text,
+          source: options.source ?? 'description',
+          subtaskKey: options.subtaskKey,
+          checkedInJira: item.checked,
+        });
+      }
+      continue;
+    }
+
     const isHeading =
       /^#{1,6}\s+/.test(line) ||
       /^[A-Z][A-Za-z /&-]{2,40}:$/.test(line) ||
@@ -118,21 +173,6 @@ export function extractAcceptanceCriteria(
     if (isHeading) {
       sawHeading = true;
       inCriteriaSection = /acceptance criteria|definition of done|^\s*(ac|criteria)\b/i.test(line);
-      continue;
-    }
-
-    const checkbox = CHECKBOX_DONE.exec(raw) ?? CHECKBOX_OPEN.exec(raw);
-    if (checkbox) {
-      const body = raw.replace(checkbox[0], '').trim();
-      if (body.length > 0) {
-        criteria.push({
-          id: `AC-${criteria.length + 1}`,
-          text: body,
-          source: options.source ?? 'description',
-          subtaskKey: options.subtaskKey,
-          checkedInJira: CHECKBOX_DONE.test(raw),
-        });
-      }
       continue;
     }
 

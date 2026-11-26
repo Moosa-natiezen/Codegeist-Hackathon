@@ -49,7 +49,7 @@ export interface RemoteLinkRef {
 }
 
 export interface ConfluencePagePayload {
-  id: string;
+  id?: string;
   title: string;
   body?: { storage?: { value?: string } };
   _links?: { webui?: string; base?: string };
@@ -194,11 +194,46 @@ export function pageIdFromUrl(url: string): string | null {
 /** Reads a Confluence page ID from a Jira remote link (globalId first, then URL). */
 export function pageIdFromRemoteLink(link: RemoteLinkRef): string | null {
   const globalId = typeof link.globalId === 'string' ? link.globalId : '';
-  const fromGlobalId = /(?:^|[?&;,\s])pageId=(\d+)/.exec(globalId);
+  const fromGlobalId = /(?:^|[?&;,\s])(?:pageId|contentId)=(\d+)/.exec(globalId);
   if (fromGlobalId) return fromGlobalId[1];
   const fromAri = /:page\/(\d+)/.exec(globalId);
   if (fromAri) return fromAri[1];
   return typeof link.url === 'string' ? pageIdFromUrl(link.url) : null;
+}
+
+/** storage-format page endpoints: API v2 first, then the v1 content endpoint. */
+function confluencePageEndpoints(pageId: string): Route[] {
+  return [
+    route`/wiki/api/v2/pages/${pageId}?body-format=storage`,
+    route`/wiki/rest/api/content/${pageId}?expand=body.storage`,
+  ];
+}
+
+/**
+ * Reads a Confluence page body in storage format.
+ *
+ * Each endpoint is tried as the user first, then as the app, because user tokens can
+ * be refused while the installed app still holds the page scope. The v2 endpoint is
+ * preferred; the v1 `expand=body.storage` endpoint is the fallback for older sites and
+ * for app versions without v2 access.
+ */
+export async function fetchConfluencePage(pageId: string): Promise<ConfluencePagePayload> {
+  const failures: string[] = [];
+
+  for (const identity of ['user', 'app'] as const) {
+    const client = identity === 'user' ? api.asUser() : api.asApp();
+    for (const endpoint of confluencePageEndpoints(pageId)) {
+      try {
+        const response = await client.requestConfluence(endpoint);
+        if (response.ok) return (await response.json()) as ConfluencePagePayload;
+        failures.push(`${identity} HTTP ${response.status}`);
+      } catch (error) {
+        failures.push(`${identity} ${(error as Error).message}`);
+      }
+    }
+  }
+
+  throw new Error(`Confluence page ${pageId} could not be read (${failures.join(', ')})`);
 }
 
 function escapeCqlTerm(term: string): string {
@@ -221,6 +256,8 @@ function looksLikeConfluenceLink(link: RemoteLinkRef): boolean {
 
 interface AdrDiscovery {
   rules: ConfluenceAdrRule[];
+  /** Page IDs resolved from remote links / CQL, logged for `forge logs` diagnosis. */
+  pageIds: string[];
   warnings: string[];
 }
 
@@ -232,14 +269,12 @@ interface AdrDiscovery {
 export async function fetchAdrRulesForPage(
   pageId: string,
 ): Promise<{ pageId: string; pageTitle: string; rules: ConfluenceAdrRule[] }> {
-  const page = await requestConfluenceJson<ConfluencePagePayload>(
-    route`/wiki/api/v2/pages/${pageId}?body-format=storage`,
-  );
+  const page = await fetchConfluencePage(pageId);
   const pageTitle = page.title ?? `Page ${pageId}`;
   const pageUrl = page._links?.webui ? `${page._links.base ?? ''}${page._links.webui}` : undefined;
 
   return {
-    pageId,
+    pageId: page.id ?? pageId,
     pageTitle,
     rules: extractAdrRules(page.body?.storage?.value ?? '', { pageId, pageTitle, pageUrl }),
   };
@@ -288,9 +323,7 @@ async function discoverAdrRules(
 
   for (const pageId of pageIds) {
     try {
-      const page = await requestConfluenceJson<ConfluencePagePayload>(
-        route`/wiki/api/v2/pages/${pageId}?body-format=storage`,
-      );
+      const page = await fetchConfluencePage(pageId);
       const pageUrl = page._links?.webui
         ? `${page._links.base ?? ''}${page._links.webui}`
         : undefined;
@@ -310,7 +343,7 @@ async function discoverAdrRules(
     warnings.push('No Confluence ADR guardrails were resolved for this issue.');
   }
 
-  return { rules, warnings };
+  return { rules, pageIds: [...pageIds], warnings };
 }
 
 export interface GraphTraversal {
@@ -483,10 +516,19 @@ export async function fetchContextBundle(
     warnings.push(`Remote links unavailable: ${(error as Error).message}`);
   }
 
+  const resolution = await resolveCloudId(options.cloudId);
   const adrDiscovery = await discoverAdrRules(issueKey, remoteLinks);
   warnings.push(...adrDiscovery.warnings);
 
-  const resolution = await resolveCloudId(options.cloudId);
+  // One structured, secret-free line so `forge logs` shows exactly how ADRs resolved.
+  console.log('[specguard] adr resolution:', {
+    issueKey,
+    remoteLinkCount: remoteLinks.length,
+    resolvedPageIds: adrDiscovery.pageIds,
+    hasCloudId: Boolean(resolution.cloudId),
+    warnings: adrDiscovery.warnings,
+  });
+
   const graph = await traverseGraph(issue.id, resolution);
   if (!graph.connected) {
     warnings.push(

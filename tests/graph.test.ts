@@ -92,35 +92,39 @@ describe('cloudId extraction', () => {
     expect(forgeMocks.requestJira).not.toHaveBeenCalled();
   });
 
-  it('falls back to /_edge/tenant_info when the context has no cloudId', async () => {
-    forgeMocks.requestJira.mockResolvedValue(jsonResponse({ cloudId: 'tenant-cloud' }));
-
+  it('never calls the non-existent tenant_info route when the context has no cloudId', async () => {
     const resolution = await resolveCloudId({});
 
-    expect(resolution).toMatchObject({ cloudId: 'tenant-cloud', source: 'tenant-info' });
-    expect(forgeMocks.requestJira).toHaveBeenCalledTimes(1);
-    expect(forgeMocks.requestJira.mock.calls[0][0]).toBe('/_edge/tenant_info');
+    expect(resolution).toMatchObject({ cloudId: null, source: 'missing' });
+    expect(resolution.detail).toContain('no cloud ID was supplied');
+    expect(forgeMocks.requestJira).not.toHaveBeenCalled();
+  });
+
+  it('finds the tenant ARI anywhere in a Rovo/MCP context', async () => {
+    const resolution = await resolveCloudId({
+      accountId: '557058:8e1b',
+      extension: { ari: 'ari:cloud:jira::site/2dac9431-ae6d-461f-a35f-17b42a3b203e' },
+    });
+
+    expect(resolution).toMatchObject({
+      cloudId: '2dac9431-ae6d-461f-a35f-17b42a3b203e',
+      source: 'context',
+    });
+    expect(forgeMocks.requestJira).not.toHaveBeenCalled();
   });
 
   it('caches a resolved cloudId for the rest of the runtime instance', async () => {
-    forgeMocks.requestJira.mockResolvedValueOnce(jsonResponse({ cloudId: 'tenant-cloud' }));
-    await resolveCloudId({});
+    await resolveCloudId({
+      installContext: 'ari:cloud:jira::site/2dac9431-ae6d-461f-a35f-17b42a3b203e',
+    });
 
-    forgeMocks.requestJira.mockRejectedValue(new Error('network down'));
     const second = await resolveCloudId({});
 
-    expect(second).toMatchObject({ cloudId: 'tenant-cloud', source: 'cache' });
-    expect(forgeMocks.requestJira).toHaveBeenCalledTimes(1);
-  });
-
-  it('reports a missing cloudId with diagnostics instead of throwing', async () => {
-    forgeMocks.requestJira.mockRejectedValue(new Error('HTTP 403'));
-
-    const resolution = await resolveCloudId({});
-
-    expect(resolution.cloudId).toBeNull();
-    expect(resolution.source).toBe('missing');
-    expect(resolution.detail).toContain('HTTP 403');
+    expect(second).toMatchObject({
+      cloudId: '2dac9431-ae6d-461f-a35f-17b42a3b203e',
+      source: 'cache',
+    });
+    expect(forgeMocks.requestJira).not.toHaveBeenCalled();
   });
 
   it('threads the Rovo action context cloudId into the tool handlers', async () => {
@@ -220,7 +224,7 @@ describe('teamwork graph traversal', () => {
       }),
     );
 
-    const traversal = await traverseGraph('10001', { cloudId: 'cloud-1', source: 'tenant-info' });
+    const traversal = await traverseGraph('10001', { cloudId: 'cloud-1', source: 'cache' });
 
     expect(traversal.connected).toBe(false);
     expect(traversal.diagnostics.reason).toBe('Teamwork Graph preview is not enabled');

@@ -4,12 +4,14 @@
  * Forge invocations do not all carry the cloud ID on the same path. UI Kit 2
  * resolvers receive a context whose tenant identity is exposed as `installContext`
  * (`ari:cloud:jira::site/<uuid>`) and/or `extension.cloudId` rather than a top-level
- * `cloudId`; Rovo action / MCP handlers get a context object that may nest it. When
- * no invocation context supplies it, the product's `/_edge/tenant_info` endpoint is
- * the documented fallback. The value is cached per runtime instance so a panel
- * interaction does not repeat the lookup.
+ * `cloudId`; Rovo action / MCP handlers get a context object that may nest it.
+ *
+ * There is deliberately no `/_edge/tenant_info` fallback: `requestJira` is scoped to
+ * `/ex/jira/{cloudId}/...`, so that route does not exist and the lookup always failed.
+ * The cloud ID has to come from the invocation context, or from a surface that forwards
+ * `useProductContext().cloudId`. Resolution logs one secret-free diagnostic line and
+ * caches the value per runtime instance.
  */
-import api, { route } from '@forge/api';
 import type { CloudIdSource } from './types';
 
 export interface CloudIdResolution {
@@ -36,6 +38,8 @@ function nonEmptyString(value: unknown): string | null {
 
 const SITE_ARI = /^ari:cloud:(?:jira|confluence)::site\/([0-9a-fA-F-]{8,})$/;
 
+const CONTEXT_DEPTH_LIMIT = 3;
+
 /**
  * Extracts the tenant UUID from a site-scoped ARI, the shape UI Kit 2 resolvers
  * expose as `context.installContext`: `ari:cloud:jira::site/<uuid>`.
@@ -59,70 +63,86 @@ function normalizeCloudId(value: unknown): string | null {
 }
 
 /**
+ * Finds the first site ARI anywhere in the context. `installContext` is the documented
+ * path, but Rovo/MCP contexts have carried the tenant under `accountId` or a nested
+ * `extension`, so the whole (small) context is scanned.
+ */
+function findSiteAri(value: unknown, depth = 0): string | null {
+  if (depth > CONTEXT_DEPTH_LIMIT) return null;
+  if (typeof value === 'string') return cloudIdFromSiteAri(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findSiteAri(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const record = asRecord(value);
+  if (!record) return null;
+  for (const nested of Object.values(record)) {
+    const found = findSiteAri(nested, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
  * Reads `cloudId` from an invocation context. Handles a raw cloud ID string, the
- * resolver shape (`cloudId`, `installContext`, `extension.cloudId`), and contexts
- * that nest the Forge context one level down (`{ context }`).
+ * resolver shape (`cloudId`, `installContext`, `extension.cloudId`), contexts that
+ * nest the Forge context one level down (`{ context }`), and any site ARI found
+ * elsewhere in the context.
  */
 export function readCloudId(value: unknown, depth = 0): string | null {
-  if (depth > 3) return null;
+  if (depth > CONTEXT_DEPTH_LIMIT) return null;
   if (typeof value === 'string') return normalizeCloudId(value);
 
   const record = asRecord(value);
   if (!record) return null;
 
-  const direct =
-    normalizeCloudId(record.cloudId) ?? cloudIdFromSiteAri(record.installContext);
+  const direct = normalizeCloudId(record.cloudId) ?? cloudIdFromSiteAri(record.installContext);
   if (direct) return direct;
 
   const extension = asRecord(record.extension);
-  const fromExtension = extension ? normalizeCloudId(extension.cloudId) : null;
+  const fromExtension = extension
+    ? (normalizeCloudId(extension.cloudId) ?? cloudIdFromSiteAri(extension.installContext))
+    : null;
   if (fromExtension) return fromExtension;
 
   const nested = record.context;
   if (nested !== undefined && nested !== value) return readCloudId(nested, depth + 1);
-  return null;
+
+  return findSiteAri(value, depth + 1);
 }
 
-async function requestTenantCloudId(identity: 'app' | 'user'): Promise<string | null> {
-  const client = identity === 'app' ? api.asApp() : api.asUser();
-  const response = await client.requestJira(route`/_edge/tenant_info`);
-  if (!response.ok) throw new Error(`tenant_info ${response.status}`);
-  const payload = (await response.json()) as { cloudId?: unknown };
-  return nonEmptyString(payload.cloudId);
+function logResolution(resolution: CloudIdResolution): CloudIdResolution {
+  // Safe to log: the value itself is never included, only where it came from.
+  console.log('[specguard] cloudId resolution:', {
+    source: resolution.source,
+    hasCloudId: Boolean(resolution.cloudId),
+  });
+  return resolution;
 }
 
 /**
- * Resolves the cloud ID from the first candidate that carries one, then the
- * instance cache, then `/_edge/tenant_info` (app identity first, user second).
+ * Resolves the cloud ID from the first candidate that carries one, then the instance
+ * cache. Every candidate may be an ARI-carrying context or a raw cloud ID string.
  */
 export async function resolveCloudId(...candidates: unknown[]): Promise<CloudIdResolution> {
   for (const candidate of candidates) {
     const fromContext = readCloudId(candidate);
     if (fromContext) {
       cachedCloudId = fromContext;
-      return { cloudId: fromContext, source: 'context' };
+      return logResolution({ cloudId: fromContext, source: 'context' });
     }
   }
 
-  if (cachedCloudId) return { cloudId: cachedCloudId, source: 'cache' };
+  if (cachedCloudId) return logResolution({ cloudId: cachedCloudId, source: 'cache' });
 
-  const failures: string[] = [];
-  for (const identity of ['app', 'user'] as const) {
-    try {
-      const fromTenantInfo = await requestTenantCloudId(identity);
-      if (fromTenantInfo) {
-        cachedCloudId = fromTenantInfo;
-        return { cloudId: fromTenantInfo, source: 'tenant-info' };
-      }
-      failures.push(`${identity}: tenant_info returned no cloudId`);
-    } catch (error) {
-      failures.push(`${identity}: ${(error as Error).message}`);
-    }
-  }
-
-  return {
+  return logResolution({
     cloudId: null,
     source: 'missing',
-    detail: failures.join('; ') || 'no cloud ID was supplied by the invocation context',
-  };
+    detail:
+      'no cloud ID was supplied by the invocation context; the panel forwards useProductContext().cloudId',
+  });
 }

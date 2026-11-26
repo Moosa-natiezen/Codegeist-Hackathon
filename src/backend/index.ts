@@ -5,6 +5,7 @@
  * the Forge runtime; `createResolver()` only wires those handlers to function keys.
  */
 import Resolver from '@forge/resolver';
+import { readCloudId } from './cloudId';
 import { fetchAdrRulesForPage, fetchContextBundle } from './contextFetcher';
 import { hasScorableSpec, NO_SPECS_MESSAGE, scoreImplementation } from './scoringEngine';
 import {
@@ -25,6 +26,7 @@ import type { AdrGovernanceIndex } from './storage';
 import type {
   AlignmentVerdict,
   ConfluenceAdrRule,
+  SpecContextBundle,
   SyncResult,
 } from './types';
 import type {
@@ -34,15 +36,21 @@ import type {
   AdrReevaluation,
   GuardrailCheckPayload,
   GuardrailCheckResponse,
+  PanelContextPayload,
   PanelIssueState,
   SyncPayload,
 } from './viewTypes';
 
 export interface PanelContext {
   cloudId?: string;
+  /** UI Kit 2 resolver contexts expose the tenant as `ari:cloud:jira::site/<uuid>`. */
+  installContext?: string;
+  accountId?: string;
   extension?: {
     issue?: { key?: string };
     content?: { id?: string };
+    cloudId?: string;
+    installContext?: string;
   };
 }
 
@@ -52,6 +60,15 @@ export interface ResolverRequest<TPayload> {
 }
 
 const PANEL_ACTOR = 'jira-issue-panel';
+
+/**
+ * The surface forwards `useProductContext().cloudId`; resolver contexts expose the same
+ * tenant as a site ARI (`installContext`). Prefer the payload, then parse the context, so
+ * the Teamwork Graph ARI is built from a real cloud ID.
+ */
+function cloudIdFor(context: PanelContext, payload?: { cloudId?: string }): string | undefined {
+  return payload?.cloudId ?? readCloudId(context) ?? undefined;
+}
 
 function issueKeyFrom(context: PanelContext): string {
   const key = context.extension?.issue?.key;
@@ -80,41 +97,63 @@ function aggregateFor(verdicts: Array<AlignmentVerdict | null>): AdrAggregate {
 /**
  * Panel payload: cached verification first, then the last stored bundle so criteria
  * and ADRs are visible (as not-verifiable) before the first verification.
+ *
+ * `refreshContext` (panel mount, Refresh, Retry) fetches live context so the criteria
+ * appear without pressing "Get context"; a failed refresh degrades to the stored bundle
+ * instead of blanking the panel.
  */
 export async function getIssueSpecState({
   context,
-}: ResolverRequest<never>): Promise<PanelIssueState> {
+  payload,
+}: ResolverRequest<PanelContextPayload>): Promise<PanelIssueState> {
   const issueKey = issueKeyFrom(context);
+  const refreshWarnings: string[] = [];
+  let live: { bundle: SpecContextBundle; bundleHash: string } | null = null;
+
+  if (payload?.refreshContext) {
+    try {
+      const bundle = await fetchContextBundle(issueKey, {
+        cloudId: cloudIdFor(context, payload),
+      });
+      const saved = await saveBundle(bundle);
+      live = { bundle, bundleHash: saved.bundleHash };
+    } catch (error) {
+      refreshWarnings.push(`Live context could not be refreshed: ${(error as Error).message}`);
+    }
+  }
+
   const [latest, history] = await Promise.all([loadLatest(issueKey), loadHistory(issueKey)]);
 
   if (latest) {
     const stored = await loadBundle(issueKey, latest.bundleId);
+    const bundle = stored?.bundle ?? live?.bundle ?? null;
     return {
       issueKey,
       state: latest.result.verdict === 'ALIGNED' ? 'aligned' : 'drift',
       result: latest.result,
       history,
-      bundle: stored?.bundle ?? null,
-      bundleHash: latest.bundleHash || (stored?.bundleHash ?? null),
+      bundle,
+      bundleHash: latest.bundleHash || stored?.bundleHash || live?.bundleHash || null,
       verifiedAt: latest.result.evaluatedAt,
       agentSource: latest.result.agentSource ?? null,
-      warnings: stored?.bundle.warnings ?? [],
+      warnings: [...(bundle?.warnings ?? []), ...refreshWarnings],
     };
   }
 
   const bundleId = await loadLastBundleId(issueKey);
   const stored = bundleId ? await loadBundle(issueKey, bundleId) : null;
+  const bundle = live?.bundle ?? stored?.bundle ?? null;
 
   return {
     issueKey,
     state: 'unverified',
     result: null,
     history,
-    bundle: stored?.bundle ?? null,
-    bundleHash: stored?.bundleHash ?? null,
+    bundle,
+    bundleHash: live?.bundleHash ?? stored?.bundleHash ?? null,
     verifiedAt: null,
     agentSource: null,
-    warnings: stored?.bundle.warnings ?? [],
+    warnings: [...(bundle?.warnings ?? []), ...refreshWarnings],
   };
 }
 
@@ -127,10 +166,8 @@ export async function runGuardrailCheck({
   payload,
 }: ResolverRequest<GuardrailCheckPayload>): Promise<GuardrailCheckResponse> {
   const issueKey = issueKeyFrom(context);
-  // Resolver contexts do not always carry a cloud ID; the panel forwards the one
-  // it read from `useProductContext()`.
   const bundle = await fetchContextBundle(issueKey, {
-    cloudId: payload?.cloudId ?? context.cloudId,
+    cloudId: cloudIdFor(context, payload),
   });
   const saved = await saveBundle(bundle);
   const summary = (payload?.implementationSummary ?? '').trim();
@@ -283,11 +320,18 @@ async function buildBylineState(
   };
 }
 
+/** Safe, secret-free diagnostic: the byline only reports where the cloud ID came from. */
+function logBylineResolution(pageId: string, cloudId: string | undefined): void {
+  console.log('[specguard] byline resolution:', { pageId, hasCloudId: Boolean(cloudId) });
+}
+
 /** Confluence byline state: governed issue count, drift status, per-issue scores. */
 export async function getAdrGovernanceState({
   context,
-}: ResolverRequest<never>): Promise<AdrBylineState> {
+  payload,
+}: ResolverRequest<PanelContextPayload>): Promise<AdrBylineState> {
   const pageId = contentIdFrom(context);
+  logBylineResolution(pageId, cloudIdFor(context, payload));
   return buildBylineState(pageId, await loadAdrGovernance(pageId));
 }
 
@@ -299,8 +343,10 @@ export async function getAdrGovernanceState({
  */
 export async function reevaluateGovernedIssues({
   context,
-}: ResolverRequest<never>): Promise<AdrReevaluation> {
+  payload,
+}: ResolverRequest<PanelContextPayload>): Promise<AdrReevaluation> {
   const pageId = contentIdFrom(context);
+  logBylineResolution(pageId, cloudIdFor(context, payload));
   const index = await loadAdrGovernance(pageId);
   if (!index) {
     return { ...(await buildBylineState(pageId, null)), changedIssues: [] };

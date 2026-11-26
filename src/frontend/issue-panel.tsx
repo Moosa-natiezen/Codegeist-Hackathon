@@ -127,20 +127,30 @@ const IssuePanel = (): React.ReactElement => {
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [showAllAudit, setShowAllAudit] = useState<boolean>(false);
 
-  const load = useCallback(async (): Promise<void> => {
-    setLoading(true);
-    setError(null);
-    try {
-      setPanel(await callResolver<PanelIssueState>('getIssueSpecState'));
-    } catch (loadError) {
-      setError(errorMessage(loadError));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // `refreshContext` asks the resolver for a live fetch (mount, Refresh, Retry) so the
+  // criteria and ADRs appear without pressing "Get context".
+  const load = useCallback(
+    async (refreshContext = false): Promise<void> => {
+      setLoading(true);
+      setError(null);
+      try {
+        setPanel(
+          await callResolver<PanelIssueState>('getIssueSpecState', {
+            cloudId: surface.cloudId ?? undefined,
+            refreshContext,
+          }),
+        );
+      } catch (loadError) {
+        setError(errorMessage(loadError));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [surface.cloudId],
+  );
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, [load]);
 
   const runCheck = useCallback(
@@ -181,7 +191,11 @@ const IssuePanel = (): React.ReactElement => {
     setBusy('sync');
     setError(null);
     try {
-      const payload: SyncPayload = { postComment: true, addDriftLabel: true };
+      const payload: SyncPayload = {
+        postComment: true,
+        addDriftLabel: true,
+        cloudId: surface.cloudId ?? undefined,
+      };
       setSyncResult(await callResolver<SyncResult>('syncVerificationToJira', payload));
       setSyncPreview(false);
       await load();
@@ -190,7 +204,7 @@ const IssuePanel = (): React.ReactElement => {
     } finally {
       setBusy(null);
     }
-  }, [load]);
+  }, [load, surface.cloudId]);
 
   // The product context resolves asynchronously; a blank panel would look broken.
   if (!surface.ready) {
@@ -276,7 +290,7 @@ const IssuePanel = (): React.ReactElement => {
         {/* 1 — Header */}
         <Inline space="space.100" alignBlock="center" spread="space-between" shouldWrap>
           <Heading size="small">SpecGuard Status</Heading>
-          <Button appearance="subtle" onClick={() => void load()} isDisabled={loading}>
+          <Button appearance="subtle" onClick={() => void load(true)} isDisabled={loading}>
             Refresh
           </Button>
         </Inline>
@@ -292,7 +306,7 @@ const IssuePanel = (): React.ReactElement => {
             <Stack space="space.100">
               <Text size="small">{error}</Text>
               <Inline>
-                <Button appearance="primary" onClick={() => void load()}>
+                <Button appearance="primary" onClick={() => void load(true)}>
                   Retry
                 </Button>
               </Inline>

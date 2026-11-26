@@ -86,12 +86,12 @@ describe('verdict and diagnostic copy', () => {
     expect(
       graphDiagnosticNote({
         attempted: true,
-        cloudIdSource: 'tenant-info',
+        cloudIdSource: 'cache',
         reason: 'request failed with HTTP 403',
       }),
     ).toBe('Teamwork Graph degraded: request failed with HTTP 403.');
-    expect(graphDiagnosticNote({ attempted: true, cloudIdSource: 'tenant-info' })).toBe(
-      'Teamwork Graph connected (cloud ID from tenant-info).',
+    expect(graphDiagnosticNote({ attempted: true, cloudIdSource: 'cache' })).toBe(
+      'Teamwork Graph connected (cloud ID from cache).',
     );
     expect(graphDiagnosticNote(undefined)).toBeNull();
   });

@@ -93,6 +93,7 @@ const implementationSummary =
 describe('issue panel resolver', () => {
   beforeEach(() => {
     forgeMocks.store.clear();
+    contextMocks.fetchContextBundle.mockClear();
     contextMocks.fetchContextBundle.mockResolvedValue(fixtureBundle);
     contextMocks.fetchAdrRulesForPage.mockResolvedValue({
       pageId: '1001',
@@ -112,6 +113,49 @@ describe('issue panel resolver', () => {
       bundleHash: null,
       history: [],
     });
+  });
+
+  it('threads the panel cloudId and refresh flag into the live context fetch', async () => {
+    const state = await getIssueSpecState({
+      context: {
+        installContext: 'ari:cloud:jira::site/2dac9431-ae6d-461f-a35f-17b42a3b203e',
+        extension: { issue: { key: 'PAY-412' } },
+      },
+      payload: { refreshContext: true },
+    });
+
+    // The resolver context only carries the site ARI; getContext gets its UUID.
+    expect(contextMocks.fetchContextBundle).toHaveBeenCalledWith('PAY-412', {
+      cloudId: '2dac9431-ae6d-461f-a35f-17b42a3b203e',
+    });
+    expect(state.bundle?.criteria[0].id).toBe('AC-1');
+  });
+
+  it('prefers the cloudId forwarded by useProductContext over the context ARI', async () => {
+    await getIssueSpecState({
+      context: {
+        installContext: 'ari:cloud:jira::site/2dac9431-ae6d-461f-a35f-17b42a3b203e',
+        extension: { issue: { key: 'PAY-412' } },
+      },
+      payload: { cloudId: 'panel-cloud', refreshContext: true },
+    });
+
+    expect(contextMocks.fetchContextBundle).toHaveBeenCalledWith('PAY-412', {
+      cloudId: 'panel-cloud',
+    });
+  });
+
+  it('keeps the stored state when a live refresh fails', async () => {
+    contextMocks.fetchContextBundle.mockRejectedValueOnce(new Error('Jira HTTP 502'));
+
+    const state = await getIssueSpecState({
+      context: issueContext,
+      payload: { refreshContext: true },
+    });
+
+    expect(state.state).toBe('unverified');
+    expect(state.bundle).toBeNull();
+    expect(state.warnings.join(' ')).toContain('Jira HTTP 502');
   });
 
   it('rejects when the panel is opened without a Jira issue context', async () => {
@@ -180,6 +224,7 @@ describe('issue panel resolver', () => {
 describe('confluence byline resolver', () => {
   beforeEach(() => {
     forgeMocks.store.clear();
+    contextMocks.fetchContextBundle.mockClear();
     contextMocks.fetchContextBundle.mockResolvedValue(fixtureBundle);
     contextMocks.fetchAdrRulesForPage.mockResolvedValue({
       pageId: '1001',

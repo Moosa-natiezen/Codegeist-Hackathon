@@ -77,7 +77,11 @@ const ConfluenceByline = (): React.ReactElement => {
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      setState(await callResolver<AdrBylineState>('getAdrGovernanceState'));
+      setState(
+        await callResolver<AdrBylineState>('getAdrGovernanceState', {
+          cloudId: surface.cloudId ?? undefined,
+        }),
+      );
       setFailed(false);
     } catch {
       // The failure is logged for forge logs; the chip stays visible but neutral.
@@ -86,7 +90,7 @@ const ConfluenceByline = (): React.ReactElement => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [surface.cloudId]);
 
   useEffect(() => {
     void load();
@@ -96,7 +100,9 @@ const ConfluenceByline = (): React.ReactElement => {
     setBusy(true);
     setError(null);
     try {
-      const next = await callResolver<AdrReevaluation>('reevaluateGovernedIssues');
+      const next = await callResolver<AdrReevaluation>('reevaluateGovernedIssues', {
+        cloudId: surface.cloudId ?? undefined,
+      });
       setReevaluation(next);
       setState(next);
     } catch (reevaluateError) {
@@ -104,7 +110,7 @@ const ConfluenceByline = (): React.ReactElement => {
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [surface.cloudId]);
 
   // The byline is only meaningful on a Confluence page; anything else stays empty.
   if (surface.contextLoaded && !surface.pageId) {

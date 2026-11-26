@@ -62,6 +62,26 @@ describe('extractAcceptanceCriteria', () => {
     expect(criteria[1]).toMatchObject({ id: 'AC-2', checkedInJira: true });
   });
 
+  it('splits a single-line checklist into one criterion per item', () => {
+    const criteria = extractAcceptanceCriteria(
+      'Acceptance Criteria: - [ ] Item 1 - [ ] Item 2 - [ ] Item 3',
+    );
+
+    expect(criteria.map((criterion) => criterion.text)).toEqual(['Item 1', 'Item 2', 'Item 3']);
+    expect(criteria.map((criterion) => criterion.id)).toEqual(['AC-1', 'AC-2', 'AC-3']);
+    expect(criteria.every((criterion) => criterion.checkedInJira === false)).toBe(true);
+  });
+
+  it('keeps checkbox state when inline items mix done and open markers', () => {
+    const criteria = extractAcceptanceCriteria('- [x] Ship the migration * [ ] Drop the old table');
+
+    expect(criteria.map((criterion) => criterion.text)).toEqual([
+      'Ship the migration',
+      'Drop the old table',
+    ]);
+    expect(criteria.map((criterion) => criterion.checkedInJira)).toEqual([true, false]);
+  });
+
   it('reads bullets nested under an acceptance criteria heading', () => {
     const criteria = extractAcceptanceCriteria(
       ['## Acceptance Criteria', '- panel shows the score', '- sync is idempotent'].join('\n'),
