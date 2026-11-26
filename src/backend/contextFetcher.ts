@@ -681,5 +681,8 @@ export async function fetchContextBundle(
     graphSource,
     linkedPullRequests: graph.linkedPullRequests,
     graphDiagnostics: graph.diagnostics,
+    // The panel reads this to know which page it can hydrate through the browser bridge
+    // when the backend read was refused, so a linked ADR is never silently invisible.
+    resolvedPageIds: adrDiscovery.pageIds,
   };
 }

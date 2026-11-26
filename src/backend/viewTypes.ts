@@ -22,6 +22,23 @@ export interface PanelIssueState {
   verifiedAt: string | null;
   agentSource: string | null;
   warnings: string[];
+  /** Confluence page IDs linked on the issue, so the panel knows what it may hydrate. */
+  resolvedPageIds: string[];
+}
+
+/**
+ * `ingestClientAdrPage` — a Confluence page body the panel read through the browser
+ * bridge (`requestConfluence`), used when the backend's own read is refused (401/403).
+ */
+export interface ClientAdrPagePayload {
+  pageId: string;
+  title?: string;
+  url?: string;
+  /** Storage-format HTML (`body.storage.value`) exactly as Confluence returned it. */
+  storageHtml: string;
+  /** Resolver context carries the issue key; the panel also forwards it explicitly. */
+  issueKey?: string;
+  cloudId?: string;
 }
 
 /** `runGuardrailCheck` — a context fetch (`mode: 'context'`) or a scored verification. */

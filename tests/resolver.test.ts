@@ -63,7 +63,15 @@ const fixtureBundle: SpecContextBundle = {
   warnings: [],
   fetchedAt: '2026-11-25T10:00:00.000Z',
   graphSource: 'teamwork-graph',
+  resolvedPageIds: ['1001'],
 };
+
+const adrStorageHtml = [
+  '<h2>Decision</h2>',
+  '<p>Decision: Adopt stateless JWTs with a 15 minute TTL.</p>',
+  '<h2>Must Not</h2>',
+  '<ul><li>Must Not: Store refresh tokens in localStorage.</li></ul>',
+].join('');
 
 const contextMocks = vi.hoisted(() => ({
   fetchContextBundle: vi.fn(),
@@ -79,6 +87,7 @@ vi.mock('../src/backend/contextFetcher', () => ({
 const {
   getAdrGovernanceState,
   getIssueSpecState,
+  ingestClientAdrPage,
   reevaluateGovernedIssues,
   runGuardrailCheck,
   syncVerificationToJira,
@@ -198,6 +207,8 @@ describe('issue panel resolver', () => {
     expect(state.state).toBe('unverified');
     expect(state.bundle?.criteria[0].id).toBe('AC-1');
     expect(state.history[0].action).toBe('get_context');
+    // The panel needs the linked page IDs to know what it can hydrate in the browser.
+    expect(state.resolvedPageIds).toEqual(['1001']);
   });
 
   it('scores an implementation and exposes it to the panel', async () => {
@@ -353,4 +364,121 @@ describe('confluence byline resolver', () => {
     expect(reevaluated.changedIssues).toEqual([]);
     expect(reevaluated.needsReReview).toBe(false);
   });
+});
+
+describe('client ADR hydration resolver', () => {
+  const restrictedContext = { extension: { issue: { key: 'CLSD-6' } } };
+
+  beforeEach(() => {
+    forgeMocks.store.clear();
+    contextMocks.fetchContextBundle.mockReset();
+    // Stands in for the cache-aware discoverAdrRules: the live page read is refused (401),
+    // so the bundle carries exactly the rules the resolver just cached in KVS.
+    contextMocks.fetchContextBundle.mockImplementation(async (issueKey: string) => {
+      const cached = forgeMocks.store.get('specguard:adr:5603635:cached_rule') as
+        | { rules: ConfluenceAdrRule[] }
+        | undefined;
+      const rules = cached?.rules ?? [];
+      return {
+        ...fixtureBundle,
+        issueKey,
+        criteria: [],
+        adrs: rules,
+        warnings:
+          rules.length === 0
+            ? ['No Confluence ADR guardrails were resolved for this issue.']
+            : [],
+        resolvedPageIds: ['5603635'],
+      };
+    });
+  });
+
+  it('extracts ADR rules from the browser page body, caches them, and returns them', async () => {
+    const state = await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: {
+        issueKey: 'CLSD-6',
+        pageId: '5603635',
+        title: 'Stateless JWT Auth & Edge Caching Policy',
+        url: '/wiki/spaces/ARCH/pages/5603635',
+        storageHtml: adrStorageHtml,
+      },
+    });
+
+    const cached = forgeMocks.store.get('specguard:adr:5603635:cached_rule') as {
+      pageId: string;
+      pageTitle: string;
+      rules: ConfluenceAdrRule[];
+      issueKeys: string[];
+    };
+    expect(cached).toMatchObject({
+      pageId: '5603635',
+      pageTitle: 'Stateless JWT Auth & Edge Caching Policy',
+    });
+    expect(cached.rules.map((rule) => rule.kind)).toEqual(['Decision', 'Must Not']);
+    expect(cached.rules.map((rule) => rule.text)).toEqual([
+      'Adopt stateless JWTs with a 15 minute TTL.',
+      'Store refresh tokens in localStorage.',
+    ]);
+    expect(cached.issueKeys).toContain('CLSD-6');
+
+    expect(forgeMocks.store.get('specguard:issue:CLSD-6:cached_adrs')).toMatchObject({
+      pageIds: ['5603635'],
+    });
+
+    expect(state.issueKey).toBe('CLSD-6');
+    expect(state.resolvedPageIds).toEqual(['5603635']);
+    expect(state.bundle?.adrs.map((rule) => rule.text)).toEqual([
+      'Adopt stateless JWTs with a 15 minute TTL.',
+      'Store refresh tokens in localStorage.',
+    ]);
+  });
+
+  it('takes the issue key from the resolver context when the payload omits it', async () => {
+    await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: { pageId: '5603635', storageHtml: adrStorageHtml },
+    });
+
+    const cached = forgeMocks.store.get('specguard:adr:5603635:cached_rule') as {
+      issueKeys: string[];
+    };
+    expect(cached.issueKeys).toContain('CLSD-6');
+    expect(forgeMocks.store.get('specguard:issue:CLSD-6:cached_adrs')).toBeTruthy();
+  });
+
+  it('rejects a non-numeric page id and an empty page body', async () => {
+    await expect(
+      ingestClientAdrPage({
+        context: restrictedContext,
+        payload: { pageId: 'not-a-page', storageHtml: adrStorageHtml },
+      }),
+    ).rejects.toThrow('A numeric Confluence page ID is required.');
+
+    await expect(
+      ingestClientAdrPage({
+        context: restrictedContext,
+        payload: { pageId: '5603635', storageHtml: '   ' },
+      }),
+    ).rejects.toThrow('returned an empty body');
+  });
+
+  it('keeps the cached rules when the ingested page carries no recognisable rules', async () => {
+    await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: { pageId: '5603635', storageHtml: adrStorageHtml },
+    });
+
+    const state = await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: { pageId: '5603635', storageHtml: '<p>Just prose about edge caching.</p>' },
+    });
+
+    const cached = forgeMocks.store.get('specguard:adr:5603635:cached_rule') as {
+      rules: ConfluenceAdrRule[];
+    };
+    expect(cached.rules).toHaveLength(2);
+    expect(state.warnings.join(' ')).toContain('No Decision, Must or Must Not rules were found');
+  });
+
 });

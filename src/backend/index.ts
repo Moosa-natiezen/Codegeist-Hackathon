@@ -7,6 +7,7 @@
 import Resolver from '@forge/resolver';
 import { readCloudId } from './cloudId';
 import { fetchAdrRulesForPage, fetchContextBundle } from './contextFetcher';
+import { extractAdrRules } from './extract';
 import { hasScorableSpec, NO_SPECS_MESSAGE, scoreImplementation } from './scoringEngine';
 import {
   appendAudit,
@@ -23,9 +24,10 @@ import {
   saveLatest,
 } from './storage';
 import { syncVerification } from './syncEngine';
-import type { AdrGovernanceIndex } from './storage';
+import type { AdrGovernanceIndex, LatestState } from './storage';
 import type {
   AlignmentVerdict,
+  AuditLogEntry,
   ConfluenceAdrRule,
   SpecContextBundle,
   SyncResult,
@@ -35,6 +37,7 @@ import type {
   AdrBylineIssue,
   AdrBylineState,
   AdrReevaluation,
+  ClientAdrPagePayload,
   GuardrailCheckPayload,
   GuardrailCheckResponse,
   PanelContextPayload,
@@ -95,6 +98,29 @@ function aggregateFor(verdicts: Array<AlignmentVerdict | null>): AdrAggregate {
   return 'default';
 }
 
+/** Shared panel projection so every path returns the exact same shape (incl. page IDs). */
+function panelStateFor(
+  issueKey: string,
+  bundle: SpecContextBundle | null,
+  bundleHash: string | null,
+  latest: LatestState | null,
+  history: AuditLogEntry[],
+  extraWarnings: string[] = [],
+): PanelIssueState {
+  return {
+    issueKey,
+    state: latest ? (latest.result.verdict === 'ALIGNED' ? 'aligned' : 'drift') : 'unverified',
+    result: latest?.result ?? null,
+    history,
+    bundle,
+    bundleHash,
+    verifiedAt: latest?.result.evaluatedAt ?? null,
+    agentSource: latest?.result.agentSource ?? null,
+    warnings: [...(bundle?.warnings ?? []), ...extraWarnings],
+    resolvedPageIds: bundle?.resolvedPageIds ?? [],
+  };
+}
+
 /**
  * Panel payload: cached verification first, then the last stored bundle so criteria
  * and ADRs are visible (as not-verifiable) before the first verification.
@@ -131,35 +157,98 @@ export async function getIssueSpecState({
 
   if (latest) {
     const stored = await loadBundle(issueKey, latest.bundleId);
-    const bundle = stored?.bundle ?? live?.bundle ?? null;
-    return {
+    return panelStateFor(
       issueKey,
-      state: latest.result.verdict === 'ALIGNED' ? 'aligned' : 'drift',
-      result: latest.result,
+      stored?.bundle ?? live?.bundle ?? null,
+      latest.bundleHash || stored?.bundleHash || live?.bundleHash || null,
+      latest,
       history,
-      bundle,
-      bundleHash: latest.bundleHash || stored?.bundleHash || live?.bundleHash || null,
-      verifiedAt: latest.result.evaluatedAt,
-      agentSource: latest.result.agentSource ?? null,
-      warnings: [...(bundle?.warnings ?? []), ...refreshWarnings],
-    };
+      refreshWarnings,
+    );
   }
 
   const bundleId = await loadLastBundleId(issueKey);
   const stored = bundleId ? await loadBundle(issueKey, bundleId) : null;
-  const bundle = live?.bundle ?? stored?.bundle ?? null;
 
-  return {
+  return panelStateFor(
     issueKey,
-    state: 'unverified',
-    result: null,
+    live?.bundle ?? stored?.bundle ?? null,
+    live?.bundleHash ?? stored?.bundleHash ?? null,
+    null,
     history,
-    bundle,
-    bundleHash: live?.bundleHash ?? stored?.bundleHash ?? null,
-    verifiedAt: null,
-    agentSource: null,
-    warnings: [...(bundle?.warnings ?? []), ...refreshWarnings],
-  };
+    refreshWarnings,
+  );
+}
+
+/**
+ * Browser-session fallback for ADR resolution. When site/space settings refuse the
+ * backend's `asApp()` read (HTTP 401 even with `read:confluence-content.all`), the panel
+ * reads the page with the signed-in viewer's own session and posts the storage HTML here.
+ *
+ * The body is parsed with the same `extractAdrRules` the byline uses, cached in KVS
+ * (`specguard:adr:<pageId>:cached_rule` + `specguard:issue:<issueKey>:cached_adrs`) so the
+ * cache-aware `discoverAdrRules` also serves Rovo and the MCP tools, then the context is
+ * re-fetched so the returned state already contains the hydrated rules.
+ */
+export async function ingestClientAdrPage({
+  context,
+  payload,
+}: ResolverRequest<ClientAdrPagePayload>): Promise<PanelIssueState> {
+  const pageId = String(payload?.pageId ?? '').trim();
+  if (!/^\d+$/.test(pageId)) {
+    throw new Error('A numeric Confluence page ID is required.');
+  }
+  const storageHtml = typeof payload?.storageHtml === 'string' ? payload.storageHtml : '';
+  if (storageHtml.trim().length === 0) {
+    throw new Error(
+      `Confluence page ${pageId} returned an empty body, so no ADR rules could be extracted.`,
+    );
+  }
+
+  const issueKey = payload?.issueKey?.trim() || issueKeyFrom(context);
+  const pageTitle = payload?.title?.trim() || pageId;
+  const pageUrl = payload?.url?.trim() || undefined;
+
+  const rules = extractAdrRules(storageHtml, { pageId, pageTitle, pageUrl });
+  const cached = await cacheAdrRules(pageId, pageTitle, rules, [issueKey], pageUrl);
+  console.log('[specguard] adr client ingest:', {
+    issueKey,
+    pageId,
+    ruleCount: rules.length,
+    cachedIssueKeys: cached?.issueKeys ?? [],
+  });
+
+  const warnings: string[] = [];
+  if (rules.length === 0) {
+    warnings.push(
+      `No Decision, Must or Must Not rules were found in Confluence page ${pageId}, so nothing was cached.`,
+    );
+  }
+
+  try {
+    const bundle = await fetchContextBundle(issueKey, {
+      cloudId: cloudIdFor(context, payload),
+    });
+    const saved = await saveBundle(bundle);
+    const [latest, history] = await Promise.all([loadLatest(issueKey), loadHistory(issueKey)]);
+    return panelStateFor(issueKey, bundle, saved.bundleHash, latest, history, warnings);
+  } catch (error) {
+    // The rules are cached already; degrade to the stored panel state rather than failing.
+    warnings.push(
+      `Context could not be refreshed after caching page ${pageId}: ${(error as Error).message}`,
+    );
+    const [latest, history] = await Promise.all([loadLatest(issueKey), loadHistory(issueKey)]);
+    const bundleId = latest?.bundleId ?? (await loadLastBundleId(issueKey));
+    const stored = bundleId ? await loadBundle(issueKey, bundleId) : null;
+    return panelStateFor(
+      issueKey,
+      stored?.bundle ?? null,
+      stored?.bundleHash ?? latest?.bundleHash ?? null,
+      latest,
+      history,
+      warnings,
+    );
+  }
 }
 
 /**
@@ -431,6 +520,7 @@ export function createResolver(): Resolver {
   const resolver = new Resolver();
 
   resolver.define('getIssueSpecState', getIssueSpecState);
+  resolver.define('ingestClientAdrPage', ingestClientAdrPage);
   resolver.define('runGuardrailCheck', runGuardrailCheck);
   resolver.define('syncVerificationToJira', syncVerificationToJira);
   resolver.define('getAdrGovernanceState', getAdrGovernanceState);

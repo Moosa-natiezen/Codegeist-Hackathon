@@ -107,6 +107,8 @@ tests/                        # unit tests for scoring + sync idempotency
 | `latest:<issueKey>` | `{ bundleId, verificationId, score, verdict }` | none | Fast panel/byline paint |
 | `verification:<verificationId>` | `Verification` (judgments, findings, score, actor, bundleHash) | 180 days | Audit trail |
 | `adr:<pageId>` | `{ governedIssues: string[], lastVerdict, needsReReview }` | none | Byline source |
+| `specguard:adr:<pageId>:cached_rule` | `{ pageId, pageTitle, pageUrl, rules, issueKeys, cachedAt }` | none | Parsed ADR rules, written by the byline or by browser-session ingestion; read by `discoverAdrRules` when a live read is refused |
+| `specguard:issue:<issueKey>:cached_adrs` | `{ issueKeys, pageIds, updatedAt }` | none | Issue → cached ADR page IDs, so the panel can resolve rules no live link returns |
 | `audit:<issueKey>` (list, capped) | `AuditEvent[]` (ts, actor, client, tool, bundleId, verdict) | 180 days | Panel audit log |
 | `config:<cloudId>:<projectKey>` | `{ statusMapping, adrBinding }` | none | Optional per-project settings |
 
@@ -146,6 +148,21 @@ verdict = score >= 85 ? "Aligned" : findings.length ? "Drift Detected" : "Unveri
 ```
 
 `not_verifiable` judgments are excluded from the ratio's denominator (never scored as failures). Weights are constants in `verification.ts` and echoed in every response so the number is explainable.
+
+---
+
+### 5.1 Browser-session ADR fallback (`ingestClientAdrPage`)
+
+Some sites refuse the app's own Confluence identity (`asUser` → `Authentication Required`, `asApp` → HTTP 401) even with `read:confluence-content.all`. The Jira panel therefore reads a linked ADR page with the viewer's session (`requestConfluence` from `@forge/bridge`, v2 then v1) and posts the storage body to the resolver:
+
+```ts
+// ingestClientAdrPage
+input : { pageId: string, storageHtml: string, title?: string, url?: string,
+          issueKey?: string, cloudId?: string }
+output: PanelIssueState   // same shape as getIssueSpecState
+```
+
+The handler extracts rules with the byline's `extractAdrRules`, caches them in the KVS keys above, then re-fetches the context so the returned bundle already contains the hydrated ADR rules. `PanelIssueState.resolvedPageIds` (mirrored from `bundle.resolvedPageIds`) tells the panel which linked pages it may hydrate.
 
 ---
 

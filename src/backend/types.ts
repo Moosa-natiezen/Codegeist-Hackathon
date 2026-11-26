@@ -80,6 +80,8 @@ export interface SpecContextBundle {
   linkedPullRequests?: number;
   /** How cloud ID / graph resolution went, surfaced in the Dependency Impact block. */
   graphDiagnostics?: GraphDiagnostics;
+  /** Confluence page IDs the issue links to (ADR pages attempted, readable or not). */
+  resolvedPageIds?: string[];
 }
 
 export interface VerificationRequest {

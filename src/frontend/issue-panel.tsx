@@ -15,7 +15,7 @@
  * always word + colour (WCAG 1.4.1); every colour is an Atlassian token resolved by
  * UI Kit — there are no hard-coded values in this file.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ForgeReconciler, {
   Box,
   Button,
@@ -36,6 +36,7 @@ import ForgeReconciler, {
 } from '@forge/react';
 import type { LozengeProps } from '@forge/react';
 import PanelBoundary from './PanelBoundary';
+import { adrCandidatePageIds, hydrateAdrRulesFromBrowser } from './clientAdrHydration';
 import { callResolver, errorMessage } from './resolverClient';
 import { useSurfaceContext } from './surfaceContext';
 import {
@@ -153,6 +154,42 @@ const IssuePanel = (): React.ReactElement => {
   useEffect(() => {
     void load(true);
   }, [load]);
+
+  // Browser-session fallback: when the backend's `asApp()` Confluence read is refused,
+  // read the linked ADR page with the viewer's own session and ingest it so the rules
+  // appear here (and are cached in KVS for Rovo and the MCP tools). Each page is tried
+  // once per panel session, so a refused page never loops.
+  const hydratedPages = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!panel || loading) return undefined;
+    if ((panel.result?.adrs.length ?? 0) > 0) return undefined;
+    if ((panel.bundle?.adrs.length ?? 0) > 0) return undefined;
+
+    const pageIds = adrCandidatePageIds(panel).filter(
+      (pageId) => !hydratedPages.current.has(pageId),
+    );
+    if (pageIds.length === 0) return undefined;
+    for (const pageId of pageIds) hydratedPages.current.add(pageId);
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const updated = await hydrateAdrRulesFromBrowser({
+          issueKey: panel.issueKey,
+          pageIds,
+          cloudId: surface.cloudId ?? undefined,
+        });
+        if (!cancelled && updated) setPanel(updated);
+      } catch (hydrationError) {
+        // The backend warnings already explain the refusal; hydration is best effort.
+        console.warn('[specguard] browser ADR hydration skipped:', errorMessage(hydrationError));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, panel, surface.cloudId]);
 
   const runCheck = useCallback(
     async (mode: 'context' | 'verify'): Promise<void> => {
