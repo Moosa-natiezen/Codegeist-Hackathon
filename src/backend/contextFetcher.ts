@@ -221,9 +221,11 @@ export async function fetchConfluencePage(pageId: string): Promise<ConfluencePag
   const failures: string[] = [];
 
   for (const identity of ['user', 'app'] as const) {
-    const client = identity === 'user' ? api.asUser() : api.asApp();
     for (const endpoint of confluencePageEndpoints(pageId)) {
       try {
+        // `api.asUser()` itself throws (e.g. NEEDS_AUTHENTICATION_ERR before user consent),
+        // so client creation stays inside the try for the app fallback to run.
+        const client = identity === 'user' ? api.asUser() : api.asApp();
         const response = await client.requestConfluence(endpoint);
         if (response.ok) return (await response.json()) as ConfluencePagePayload;
         failures.push(`${identity} HTTP ${response.status}`);
@@ -238,6 +240,27 @@ export async function fetchConfluencePage(pageId: string): Promise<ConfluencePag
 
 function escapeCqlTerm(term: string): string {
   return term.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * CQL reserved characters (`:`, `-`, quotes, brackets, `~`, `?`, `*`, `\`) cannot be
+ * escaped inside a `title ~` term, so a title search collapses them into spaces.
+ */
+export function sanitizeCqlTerm(term: string): string {
+  return term
+    .replace(/["'()\[\]:~?*\\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Exact-title page lookup through API v2; callers degrade to a warning on failure. */
+async function findPagesByExactTitle(title: string): Promise<string[]> {
+  const pages = await requestConfluenceJson<{ results?: Array<{ id?: string }> }>(
+    route`/wiki/api/v2/pages?title=${encodeURIComponent(title)}&limit=5`,
+  );
+  return (pages.results ?? [])
+    .map((page) => page.id)
+    .filter((id): id is string => typeof id === 'string');
 }
 
 /** CQL search limited to page IDs; callers degrade to a warning on failure. */
@@ -302,7 +325,15 @@ async function discoverAdrRules(
 
   for (const title of unresolvedTitles) {
     try {
-      for (const id of await searchConfluencePageIds(`title = "${escapeCqlTerm(title)}"`)) {
+      for (const id of await findPagesByExactTitle(title)) pageIds.add(id);
+    } catch (error) {
+      warnings.push(`Confluence exact title lookup unavailable: ${(error as Error).message}`);
+    }
+
+    const term = sanitizeCqlTerm(title);
+    if (term.length === 0) continue;
+    try {
+      for (const id of await searchConfluencePageIds(`type = page AND title ~ "${term}"`)) {
         pageIds.add(id);
       }
     } catch (error) {

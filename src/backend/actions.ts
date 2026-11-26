@@ -89,6 +89,9 @@ export function buildInstructions(bundle: SpecContextBundle): string {
  *
  * `cloudId` comes from the Rovo action / MCP invocation context; when it is absent
  * the bundle resolves one itself, so the graph is not silently skipped.
+ *
+ * Never enforces the empty-spec guard: `get_context` always returns the loaded bundle, even
+ * when it has zero criteria and zero ADRs. Only `specguard_verify_implementation` refuses.
  */
 export async function getContext(
   input: GetContextInput,

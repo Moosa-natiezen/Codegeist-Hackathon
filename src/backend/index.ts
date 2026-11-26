@@ -101,6 +101,10 @@ function aggregateFor(verdicts: Array<AlignmentVerdict | null>): AdrAggregate {
  * `refreshContext` (panel mount, Refresh, Retry) fetches live context so the criteria
  * appear without pressing "Get context"; a failed refresh degrades to the stored bundle
  * instead of blanking the panel.
+ *
+ * This handler never enforces `hasScorableSpec`: an issue with no criteria and no ADRs is
+ * a normal, renderable state (the panel disables the drift check and shows the hint). Only
+ * `runGuardrailCheck` and `specguard_verify_implementation` refuse to score.
  */
 export async function getIssueSpecState({
   context,

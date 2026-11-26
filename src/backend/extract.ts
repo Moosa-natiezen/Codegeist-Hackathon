@@ -81,11 +81,19 @@ export function descriptionToText(description: unknown): string {
   return adfToText(description);
 }
 
-const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+/;
+const BULLET = /^\s*(?:[-*•·+]|\d+[.)])\s+/;
 
-/** One checkbox marker. The leading whitespace belongs to the marker, not the item. */
-const CHECKBOX_TOKEN = /(?:^|\s)[-*]\s*\[([ xX])\]/g;
-const HAS_CHECKBOX = /(?:^|\s)[-*]\s*\[[ xX]\]/;
+/**
+ * One checkbox marker: an optional bullet (`-`, `*`, `•`, `·`, `+`, `1.`) followed by a
+ * box (`[ ]`, `[x]`, `☐`, `☑`, `✅`). Jira's rich-text editor flattens a checklist into a
+ * bulletList whose text starts with `• [ ] …` or plain `[ ] …`, so the bullet is optional.
+ */
+const BOX = String.raw`(?:\[\s*[xX]?\s*\]|☐|☑|✅)`;
+const CHECKBOX_TOKEN = new RegExp(
+  String.raw`(?:^|\s)(?:[•·*+\-]|\d+[.)])?\s*(${BOX})`,
+  'g',
+);
+const HAS_CHECKBOX = new RegExp(CHECKBOX_TOKEN.source);
 
 interface CheckboxItem {
   text: string;
@@ -105,7 +113,7 @@ function splitCheckboxLine(raw: string): CheckboxItem[] {
     tokens.push({
       textStart: match.index + match[0].length,
       markerStart: match.index,
-      checked: match[1].toLowerCase() === 'x',
+      checked: /x|☑|✅/i.test(match[1]),
     });
     match = CHECKBOX_TOKEN.exec(raw);
   }
@@ -129,7 +137,7 @@ function splitCheckboxLine(raw: string): CheckboxItem[] {
  * Extracts acceptance criteria from description text.
  *
  * Recognised shapes:
- *  - checkbox lists: `- [ ] must retry on 429`
+ *  - checkbox lists: `- [ ] must retry on 429`, `• [ ] …`, plain `[ ] …`, `☐ …`
  *  - bullet/numbered lists nested under an "Acceptance Criteria" style heading
  *  - plain bullet lists when no heading is present (all bullets are criteria)
  */
@@ -204,7 +212,7 @@ const RULE_HEADING: Array<{ kind: RuleKind; pattern: RegExp }> = [
 ];
 
 function classifyRule(line: string): RuleKind | null {
-  const cleaned = line.replace(/^[-*•]\s+/, '').trim();
+  const cleaned = line.replace(/^[-*•·+]\s+/, '').trim();
   for (const { kind, pattern } of RULE_HEADING) {
     if (pattern.test(cleaned)) return kind;
   }
@@ -213,8 +221,9 @@ function classifyRule(line: string): RuleKind | null {
 
 /**
  * Parses ADR rules from a page body (storage-format HTML already flattened, or markdown).
- * Recognises explicit `Decision`, `Must`, `Must Not`, `Constraints`, `Guardrails` statements;
- * bullets nested under such a heading inherit its kind.
+ * Recognises explicit `Decision`, `Must`, `Must Not`, `Constraints`, `Guardrails` statements —
+ * in headings, bold-wrapped labels, and plain paragraphs alike; bullets nested under such a
+ * heading inherit its kind.
  */
 export function extractAdrRules(
   pageBody: string,
@@ -224,7 +233,11 @@ export function extractAdrRules(
 
   const plain = pageBody
     .replace(/<li[^>]*>/gi, '\n- ')
-    .replace(/<(\/p|\/h[1-6]|br\s*\/?)>/gi, '\n')
+    .replace(/<\/(?:p|h[1-6]|li|div|tr)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    // Inline tags collapse instead of breaking the line, so a bold-wrapped label keeps
+    // its statement: `<p><strong>Must Not:</strong> Break X</p>` is one rule, not two.
+    .replace(/<\/?(?:strong|b|em|i|u|span|code|a|s|sup|sub)[^>]*>/gi, '')
     .replace(/<[^>]+>/g, '\n')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -246,11 +259,16 @@ export function extractAdrRules(
       // a bare section label only sets the kind for the bullets that follow.
       const afterColon = line.split(':').slice(1).join(':').trim();
       const bareLabel = line
-        .replace(/^[-*•]\s+/, '')
+        .replace(/^[-*•·+]\s+/, '')
         .replace(/:$/, '')
         .trim()
         .split(/\s+/).length <= 3;
-      const inline = afterColon.length >= 4 ? afterColon : bareLabel ? '' : line.replace(/^[-*•]\s+/, '').trim();
+      const inline =
+        afterColon.length >= 4
+          ? afterColon
+          : bareLabel
+            ? ''
+            : line.replace(/^[-*•·+]\s+/, '').trim();
       if (inline.length >= 4) {
         rules.push({ ...page, kind: headingKind, text: inline });
       }

@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const forgeMocks = vi.hoisted(() => {
+  const state = { asUserThrows: false };
   const userConfluence = vi.fn();
   const appConfluence = vi.fn();
   const api = {
-    asUser: () => ({ requestJira: vi.fn(), requestConfluence: userConfluence }),
+    asUser: () => {
+      // Forge throws this before the user has granted consent for the app.
+      if (state.asUserThrows) throw new Error('NEEDS_AUTHENTICATION_ERR');
+      return { requestJira: vi.fn(), requestConfluence: userConfluence };
+    },
     asApp: () => ({ requestJira: vi.fn(), requestConfluence: appConfluence }),
   };
   // Mirrors the Forge `route` template helper: a template tag that returns the path.
@@ -13,7 +18,7 @@ const forgeMocks = vi.hoisted(() => {
       (acc, part, index) => acc + part + (index < values.length ? String(values[index]) : ''),
       '',
     );
-  return { api, route, userConfluence, appConfluence };
+  return { api, route, userConfluence, appConfluence, state };
 });
 
 vi.mock('@forge/api', () => ({
@@ -22,7 +27,7 @@ vi.mock('@forge/api', () => ({
   route: forgeMocks.route,
 }));
 
-const { fetchConfluencePage } = await import('../src/backend/contextFetcher');
+const { fetchConfluencePage, sanitizeCqlTerm } = await import('../src/backend/contextFetcher');
 
 const pageBody = {
   id: '1001',
@@ -34,6 +39,7 @@ const notFound = { ok: false, status: 404, json: async () => ({}) };
 
 describe('Confluence page fetch fallbacks', () => {
   beforeEach(() => {
+    forgeMocks.state.asUserThrows = false;
     forgeMocks.userConfluence.mockReset();
     forgeMocks.appConfluence.mockReset();
   });
@@ -71,6 +77,17 @@ describe('Confluence page fetch fallbacks', () => {
     expect(forgeMocks.appConfluence.mock.calls[0][0]).toContain('/wiki/api/v2/pages/1001');
   });
 
+  it('falls back to the app when api.asUser() itself throws NEEDS_AUTHENTICATION_ERR', async () => {
+    forgeMocks.state.asUserThrows = true;
+    forgeMocks.appConfluence.mockResolvedValue(ok(pageBody));
+
+    const page = await fetchConfluencePage('1001');
+
+    expect(page.title).toBe('ADR-014 Event Contracts');
+    expect(forgeMocks.userConfluence).not.toHaveBeenCalled();
+    expect(forgeMocks.appConfluence.mock.calls[0][0]).toContain('/wiki/api/v2/pages/1001');
+  });
+
   it('reports every attempt when the page cannot be read at all', async () => {
     forgeMocks.userConfluence.mockResolvedValue(notFound);
     forgeMocks.appConfluence.mockResolvedValue(notFound);
@@ -78,5 +95,14 @@ describe('Confluence page fetch fallbacks', () => {
     await expect(fetchConfluencePage('1001')).rejects.toThrow(
       /Confluence page 1001 could not be read/,
     );
+  });
+});
+
+describe('CQL title sanitization', () => {
+  it('collapses reserved characters so a title term cannot break the query', () => {
+    expect(sanitizeCqlTerm('ADR-014: Event "Contracts" (v2)*')).toBe(
+      'ADR 014 Event Contracts v2',
+    );
+    expect(sanitizeCqlTerm('  Refresh~token?  ')).toBe('Refresh token');
   });
 });

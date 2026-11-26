@@ -72,6 +72,23 @@ describe('extractAcceptanceCriteria', () => {
     expect(criteria.every((criterion) => criterion.checkedInJira === false)).toBe(true);
   });
 
+  it('parses Jira bullet-list flattened checkboxes without a dash or star', () => {
+    const criteria = extractAcceptanceCriteria(
+      [
+        '• [ ] Validate refresh token rotation',
+        '[ ] Enforce role-based access',
+        '☑ Emit an audit log entry',
+      ].join('\n'),
+    );
+
+    expect(criteria.map((criterion) => criterion.text)).toEqual([
+      'Validate refresh token rotation',
+      'Enforce role-based access',
+      'Emit an audit log entry',
+    ]);
+    expect(criteria.map((criterion) => criterion.checkedInJira)).toEqual([false, false, true]);
+  });
+
   it('keeps checkbox state when inline items mix done and open markers', () => {
     const criteria = extractAcceptanceCriteria('- [x] Ship the migration * [ ] Drop the old table');
 
@@ -130,6 +147,26 @@ describe('extractAdrRules', () => {
     expect(rules.filter((rule) => rule.kind === 'Must')).toHaveLength(2);
     expect(rules.some((rule) => rule.kind === 'Must Not')).toBe(true);
     expect(rules.some((rule) => rule.kind === 'Constraints')).toBe(true);
+    expect(rules.every((rule) => rule.pageId === '1001')).toBe(true);
+  });
+
+  it('extracts plain-paragraph and bold-wrapped rules', () => {
+    const html = [
+      '<p>Decision: We will use schema-registry validation for every published event.</p>',
+      '<p>Must: Validate payloads before publish.</p>',
+      '<p><strong>Must Not:</strong> Break the consumer contract without a major version bump.</p>',
+      '<p>Constraints: No synchronous calls between domains.</p>',
+    ].join('');
+
+    const rules = extractAdrRules(html, page);
+
+    expect(rules.map((rule) => rule.kind)).toEqual([
+      'Decision',
+      'Must',
+      'Must Not',
+      'Constraints',
+    ]);
+    expect(rules[2].text).toBe('Break the consumer contract without a major version bump.');
     expect(rules.every((rule) => rule.pageId === '1001')).toBe(true);
   });
 

@@ -66,7 +66,7 @@ vi.mock('../src/backend/contextFetcher', () => ({
 }));
 
 const { runGuardrailCheck } = await import('../src/backend/index');
-const { verifyImplementation } = await import('../src/backend/actions');
+const { getContext, verifyImplementation } = await import('../src/backend/actions');
 const { hasScorableSpec, NO_SPECS_ERROR_CODE, NO_SPECS_MESSAGE } = await import(
   '../src/backend/scoringEngine'
 );
@@ -110,6 +110,16 @@ describe('empty-spec guard', () => {
       message: NO_SPECS_MESSAGE,
     });
     expect(forgeMocks.store.has('specguard:issue:PAY-412:latest')).toBe(false);
+  });
+
+  it('returns an empty bundle from getContext instead of throwing', async () => {
+    const result = await getContext({ issueKey: 'PAY-412' });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.bundle.criteria).toEqual([]);
+    expect(result.data.bundle.adrs).toEqual([]);
+    expect(result.data.instructions).toContain('definition of done');
   });
 
   it('rejects the panel drift check instead of reporting 0% BLOCKED_OR_VIOLATION', async () => {

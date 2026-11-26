@@ -158,6 +158,26 @@ describe('issue panel resolver', () => {
     expect(state.warnings.join(' ')).toContain('Jira HTTP 502');
   });
 
+  it('renders an empty spec without throwing when an issue has no criteria and no ADRs', async () => {
+    contextMocks.fetchContextBundle.mockResolvedValueOnce({
+      ...fixtureBundle,
+      criteria: [],
+      adrs: [],
+      warnings: ['No acceptance criteria were found in the issue description or subtasks.'],
+    });
+
+    const state = await getIssueSpecState({
+      context: issueContext,
+      payload: { refreshContext: true },
+    });
+
+    expect(state.state).toBe('unverified');
+    expect(state.result).toBeNull();
+    expect(state.bundle?.criteria).toEqual([]);
+    expect(state.bundle?.adrs).toEqual([]);
+    expect(state.warnings.join(' ')).toContain('No acceptance criteria');
+  });
+
   it('rejects when the panel is opened without a Jira issue context', async () => {
     await expect(getIssueSpecState({ context: {} })).rejects.toThrow(
       'SpecGuard must be opened from a Jira issue context.',
