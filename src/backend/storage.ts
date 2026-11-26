@@ -17,12 +17,34 @@ export const keys = {
   bundle: (issueKey: string, bundleId: string) => `specguard:issue:${issueKey}:bundle:${bundleId}`,
   lastBundle: (issueKey: string) => `specguard:issue:${issueKey}:last-bundle`,
   adr: (pageId: string) => `specguard:adr:${pageId}:issues`,
+  /** Parsed ADR rules written by the Confluence byline and read by the Jira panel. */
+  cachedRule: (pageId: string) => `specguard:adr:${pageId}:cached_rule`,
+  /** Page IDs whose rules the byline cached for one governed Jira issue. */
+  cachedAdrs: (issueKey: string) => `specguard:issue:${issueKey}:cached_adrs`,
 } as const;
 
 export interface LatestState {
   result: VerificationResult;
   bundleId: string;
   bundleHash: string;
+}
+
+/** One page's parsed ADR rules, cached so a refused live read is not fatal. */
+export interface CachedAdrPage {
+  pageId: string;
+  pageTitle: string;
+  pageUrl?: string;
+  rules: ConfluenceAdrRule[];
+  /** Jira issues the rules were cached for (linked keys plus keys mentioned in the text). */
+  issueKeys: string[];
+  cachedAt: string;
+}
+
+/** Issue → cached ADR page IDs, so the panel can find rules no live link resolves. */
+export interface CachedIssueAdrs {
+  issueKeys: string[];
+  pageIds: string[];
+  updatedAt: string;
 }
 
 export interface AdrGovernanceIndex {
@@ -145,4 +167,71 @@ export async function loadAdrGovernance(pageId: string): Promise<AdrGovernanceIn
 
 export async function saveAdrGovernance(index: AdrGovernanceIndex): Promise<void> {
   await storage.set(keys.adr(index.pageId), index);
+}
+
+const ISSUE_KEY_PATTERN = /\b[A-Z][A-Z0-9]{1,9}-\d{1,6}\b/g;
+
+/** Jira issue keys named in rule text/title, plus the ones the caller already knows. */
+export function issueKeysInAdrRules(
+  rules: ConfluenceAdrRule[],
+  known: string[] = [],
+): string[] {
+  const found = new Set(known.filter((key) => typeof key === 'string' && key.trim().length > 0));
+  for (const rule of rules) {
+    // Rule text only: ADR page titles carry doc ids like `ADR-014`, which are not issues.
+    for (const match of rule.text.match(ISSUE_KEY_PATTERN) ?? []) found.add(match);
+  }
+  return [...found].slice(0, 50);
+}
+
+/**
+ * Confluence → Jira bridge: stores a page's parsed ADR rules under
+ * `specguard:adr:<pageId>:cached_rule` and links them to every referenced issue key
+ * under `specguard:issue:<issueKey>:cached_adrs`. Returns `null` when there is nothing
+ * worth caching, so an unreadable page never overwrites good rules with an empty list.
+ */
+export async function cacheAdrRules(
+  pageId: string,
+  pageTitle: string,
+  rules: ConfluenceAdrRule[],
+  knownIssueKeys: string[] = [],
+  pageUrl?: string,
+): Promise<CachedAdrPage | null> {
+  if (rules.length === 0) return null;
+
+  const issueKeys = issueKeysInAdrRules(rules, knownIssueKeys);
+  const cached: CachedAdrPage = {
+    pageId,
+    pageTitle,
+    pageUrl: pageUrl ?? rules[0]?.pageUrl,
+    rules,
+    issueKeys,
+    cachedAt: new Date().toISOString(),
+  };
+  await storage.set(keys.cachedRule(pageId), cached);
+
+  for (const issueKey of issueKeys) {
+    const key = keys.cachedAdrs(issueKey);
+    const existing = (await storage.get<CachedIssueAdrs>(key)) ?? {
+      issueKeys: [],
+      pageIds: [],
+      updatedAt: cached.cachedAt,
+    };
+    await storage.set(key, {
+      issueKeys: existing.issueKeys,
+      pageIds: [...new Set([...existing.pageIds, pageId])].slice(0, 50),
+      updatedAt: cached.cachedAt,
+    });
+  }
+
+  return cached;
+}
+
+export async function loadCachedAdrPage(pageId: string): Promise<CachedAdrPage | null> {
+  return (await storage.get<CachedAdrPage>(keys.cachedRule(pageId))) ?? null;
+}
+
+export async function loadCachedAdrPageIds(issueKey: string): Promise<string[]> {
+  const cached = await storage.get<CachedIssueAdrs>(keys.cachedAdrs(issueKey));
+  return (cached?.pageIds ?? []).filter((id): id is string => typeof id === 'string');
 }

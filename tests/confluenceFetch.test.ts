@@ -4,6 +4,16 @@ const forgeMocks = vi.hoisted(() => {
   const state = { asUserThrows: false };
   const userConfluence = vi.fn();
   const appConfluence = vi.fn();
+  const store = new Map<string, unknown>();
+  const storage = {
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
+    set: vi.fn(async (key: string, value: unknown) => {
+      store.set(key, value);
+    }),
+    delete: vi.fn(async (key: string) => {
+      store.delete(key);
+    }),
+  };
   const api = {
     asUser: () => {
       // Forge throws this before the user has granted consent for the app.
@@ -18,8 +28,13 @@ const forgeMocks = vi.hoisted(() => {
       (acc, part, index) => acc + part + (index < values.length ? String(values[index]) : ''),
       '',
     );
-  return { api, route, userConfluence, appConfluence, state };
+  return { api, route, store, storage, userConfluence, appConfluence, state };
 });
+
+vi.mock('@forge/kvs', () => ({
+  default: forgeMocks.storage,
+  storage: forgeMocks.storage,
+}));
 
 vi.mock('@forge/api', () => ({
   default: forgeMocks.api,
@@ -27,7 +42,10 @@ vi.mock('@forge/api', () => ({
   route: forgeMocks.route,
 }));
 
-const { fetchConfluencePage, sanitizeCqlTerm } = await import('../src/backend/contextFetcher');
+const { discoverAdrRules, fetchConfluencePage, sanitizeCqlTerm } = await import(
+  '../src/backend/contextFetcher'
+);
+const { cacheAdrRules } = await import('../src/backend/storage');
 
 const pageBody = {
   id: '1001',
@@ -106,6 +124,61 @@ describe('Confluence page fetch fallbacks', () => {
     await expect(fetchConfluencePage('1001')).rejects.toThrow(
       /Confluence page 1001 could not be read/,
     );
+  });
+});
+
+describe('KVS ADR cache fallback', () => {
+  const adrPageId = '5603635';
+  const cachedRule = {
+    pageId: adrPageId,
+    pageTitle: 'Stateless JWT Auth & Edge Caching Policy',
+    kind: 'Must' as const,
+    text: 'Cache validated tokens for five minutes and never re-verify them per request',
+  };
+  const adrUrl = `https://one-atlas-deuz.atlassian.net/wiki/spaces/ARCH/pages/${adrPageId}`;
+  const unauthorized = { ok: false, status: 401, json: async () => ({}) };
+  const forbidden = { ok: false, status: 403, json: async () => ({}) };
+
+  beforeEach(() => {
+    forgeMocks.store.clear();
+    forgeMocks.userConfluence.mockReset();
+    forgeMocks.appConfluence.mockReset();
+  });
+
+  it('uses the rule the byline cached when the live page read is refused', async () => {
+    await cacheAdrRules(adrPageId, cachedRule.pageTitle, [cachedRule], ['CLSD-6']);
+    // `api.asUser()` throws Authentication Required in production; app gets a 403 here.
+    forgeMocks.userConfluence.mockRejectedValue(new Error('Authentication Required'));
+    forgeMocks.appConfluence.mockResolvedValue(forbidden);
+
+    const discovery = await discoverAdrRules('CLSD-6', [{ url: adrUrl }]);
+
+    expect(discovery.rules).toEqual([cachedRule]);
+    expect(discovery.cachedPageIds).toEqual([adrPageId]);
+    expect(discovery.warnings.join(' ')).toContain(
+      'is restricted (HTTP 401/403). Open the ADR page, click Share',
+    );
+    expect(discovery.warnings.join(' ')).toContain('cached guardrail rule');
+  });
+
+  it('resolves a cached page for the issue when no live link exists', async () => {
+    await cacheAdrRules(adrPageId, cachedRule.pageTitle, [cachedRule], ['CLSD-7']);
+
+    const discovery = await discoverAdrRules('CLSD-7', []);
+
+    expect(discovery.rules).toEqual([cachedRule]);
+    expect(discovery.warnings.join(' ')).toContain('was not resolved from a live link');
+  });
+
+  it('reports the restricted-page guidance when the app is refused with 401 too', async () => {
+    forgeMocks.userConfluence.mockRejectedValue(new Error('Authentication Required'));
+    forgeMocks.appConfluence.mockResolvedValue(unauthorized);
+
+    const discovery = await discoverAdrRules('CLSD-8', [{ url: adrUrl }]);
+
+    expect(discovery.rules).toEqual([]);
+    expect(discovery.warnings[0]).toContain(`Confluence page ${adrPageId} is restricted`);
+    expect(discovery.warnings.join(' ')).not.toContain('[object Object]');
   });
 });
 

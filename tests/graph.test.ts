@@ -21,6 +21,20 @@ vi.mock('@forge/api', () => ({
   route: forgeMocks.route,
 }));
 
+// `contextFetcher` reads the ADR cache from KVS; these tests never touch the store.
+const kvsStore = new Map<string, unknown>();
+vi.mock('@forge/kvs', () => ({
+  default: {
+    get: async (key: string) => kvsStore.get(key) ?? null,
+    set: async (key: string, value: unknown) => {
+      kvsStore.set(key, value);
+    },
+    delete: async (key: string) => {
+      kvsStore.delete(key);
+    },
+  },
+}));
+
 const actionMocks = vi.hoisted(() => ({
   getContext: vi.fn(async () => ({ ok: true, data: {} })),
   verifyImplementation: vi.fn(async () => ({ ok: true, data: {} })),

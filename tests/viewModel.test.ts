@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   absoluteUrl,
+  adrDiagnosticNote,
   governedChipLabel,
   graphDiagnosticNote,
   readIssueKey,
@@ -28,6 +29,28 @@ describe('surface context paths', () => {
     expect(readIssueKey({ extension: { issue: {} } })).toBeNull();
     expect(readIssueKey({ extension: { issue: { key: '  ' } } })).toBeNull();
     expect(readPageId({ extension: { content: 'not-an-object' } })).toBeNull();
+  });
+});
+
+describe('ADR diagnostics', () => {
+  it('surfaces the exact ADR warning when no rule loaded', () => {
+    const note = adrDiagnosticNote([], [
+      'Confluence exact title lookup unavailable: Confluence request failed: app=HTTP 401',
+      'Confluence page 5603635 is restricted (HTTP 401/403). Open the ADR page, click Share, and allow site/space view access so SpecGuard can read its rules.',
+    ]);
+
+    expect(note).toBe(
+      'Confluence exact title lookup unavailable: Confluence request failed: app=HTTP 401',
+    );
+  });
+
+  it('stays silent when a rule loaded or only the generic warning is present', () => {
+    expect(adrDiagnosticNote([{ pageId: '1001' }], ['ADR page 1001 could not be read'])).toBeNull();
+    expect(
+      adrDiagnosticNote([], ['No Confluence ADR guardrails were resolved for this issue.']),
+    ).toBeNull();
+    expect(adrDiagnosticNote([], undefined)).toBeNull();
+    expect(adrDiagnosticNote([], ['No acceptance criteria were found.'])).toBeNull();
   });
 });
 

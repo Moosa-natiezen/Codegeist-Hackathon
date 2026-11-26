@@ -306,6 +306,43 @@ describe('confluence byline resolver', () => {
     expect(state.needsReReview).toBe(true);
   });
 
+  it('caches the page ADR rules into KVS so the Jira panel can resolve them', async () => {
+    await runGuardrailCheck({
+      context: issueContext,
+      payload: { mode: 'verify', implementationSummary },
+    });
+
+    await getAdrGovernanceState({ context: pageContext });
+
+    expect(forgeMocks.store.get('specguard:adr:1001:cached_rule')).toMatchObject({
+      pageId: '1001',
+      pageTitle: adrRule.pageTitle,
+      rules: [adrRule],
+    });
+    expect(forgeMocks.store.get('specguard:issue:PAY-412:cached_adrs')).toMatchObject({
+      pageIds: ['1001'],
+    });
+  });
+
+  it('caches the freshly read rules during re-evaluation', async () => {
+    await runGuardrailCheck({
+      context: issueContext,
+      payload: { mode: 'verify', implementationSummary },
+    });
+
+    contextMocks.fetchAdrRulesForPage.mockResolvedValueOnce({
+      pageId: '1001',
+      pageTitle: adrRule.pageTitle,
+      rules: [{ ...adrRule, text: 'Publish events through the outbox table' }],
+    });
+    await reevaluateGovernedIssues({ context: pageContext });
+
+    const cached = forgeMocks.store.get('specguard:adr:1001:cached_rule') as {
+      rules: Array<{ text: string }>;
+    };
+    expect(cached.rules[0].text).toBe('Publish events through the outbox table');
+  });
+
   it('clears the re-review flag when ADR rules are unchanged', async () => {
     await runGuardrailCheck({
       context: issueContext,

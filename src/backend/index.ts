@@ -10,6 +10,7 @@ import { fetchAdrRulesForPage, fetchContextBundle } from './contextFetcher';
 import { hasScorableSpec, NO_SPECS_MESSAGE, scoreImplementation } from './scoringEngine';
 import {
   appendAudit,
+  cacheAdrRules,
   hashText,
   indexAdrGovernance,
   loadAdrGovernance,
@@ -324,6 +325,46 @@ async function buildBylineState(
   };
 }
 
+/**
+ * Writes the page's parsed ADR rules to KVS so the Jira panel can still resolve
+ * guardrails when Confluence refuses its own live read (this site does for 401/403).
+ * Never throws: a caching failure must not break the byline.
+ */
+async function cachePageAdrRules(
+  pageId: string,
+  pageTitle: string,
+  rules: ConfluenceAdrRule[],
+  issueKeys: string[],
+  pageUrl?: string,
+): Promise<void> {
+  try {
+    const cached = await cacheAdrRules(pageId, pageTitle, rules, issueKeys, pageUrl);
+    console.log('[specguard] adr cache write:', {
+      pageId,
+      ruleCount: cached?.rules.length ?? 0,
+      issueKeys: cached?.issueKeys ?? [],
+    });
+  } catch (error) {
+    console.warn('[specguard] adr cache write failed:', {
+      pageId,
+      reason: (error as Error).message,
+    });
+  }
+}
+
+/** Reads the byline's page and caches whatever rules it can extract; failures are logged only. */
+async function refreshAdrRuleCache(pageId: string, issueKeys: string[]): Promise<void> {
+  try {
+    const fresh = await fetchAdrRulesForPage(pageId);
+    await cachePageAdrRules(pageId, fresh.pageTitle, fresh.rules, issueKeys);
+  } catch (error) {
+    console.warn('[specguard] adr cache refresh skipped:', {
+      pageId,
+      reason: (error as Error).message,
+    });
+  }
+}
+
 /** Safe, secret-free diagnostic: the byline only reports where the cloud ID came from. */
 function logBylineResolution(pageId: string, cloudId: string | undefined): void {
   console.log('[specguard] byline resolution:', { pageId, hasCloudId: Boolean(cloudId) });
@@ -336,7 +377,10 @@ export async function getAdrGovernanceState({
 }: ResolverRequest<PanelContextPayload>): Promise<AdrBylineState> {
   const pageId = contentIdFrom(context);
   logBylineResolution(pageId, cloudIdFor(context, payload));
-  return buildBylineState(pageId, await loadAdrGovernance(pageId));
+  const index = await loadAdrGovernance(pageId);
+  // Bridge for the Jira panel: the byline holds (or can read) the ADR page body.
+  await refreshAdrRuleCache(pageId, index?.issueKeys ?? []);
+  return buildBylineState(pageId, index);
 }
 
 /**
@@ -357,6 +401,8 @@ export async function reevaluateGovernedIssues({
   }
 
   const fresh = await fetchAdrRulesForPage(pageId);
+  // Re-evaluation already read the page: cache those rules for the Jira panel.
+  await cachePageAdrRules(pageId, fresh.pageTitle, fresh.rules, index.issueKeys);
   const freshHash = rulesHash(fresh.rules);
   const changedIssues: string[] = [];
 

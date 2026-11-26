@@ -40,6 +40,7 @@ import { callResolver, errorMessage } from './resolverClient';
 import { useSurfaceContext } from './surfaceContext';
 import {
   absoluteUrl,
+  adrDiagnosticNote,
   graphDiagnosticNote,
   shortVerdictLabel,
   unverifiedHint,
@@ -272,6 +273,8 @@ const IssuePanel = (): React.ReactElement => {
   // Scoring needs criteria or ADR guardrails; with neither, a run would report a
   // misleading 0% block, so the submit button stays disabled.
   const specsAvailable = criteria.length > 0 || adrs.length > 0;
+  // Exact resolver warning (restricted page, HTTP failure, unresolved link) when no ADR loaded.
+  const adrNote = adrDiagnosticNote(adrs, panel?.warnings);
 
   const metCount = criteria.filter((criterion) => criterion.status === 'met').length;
   const consideredCount = criteria.filter(
@@ -436,10 +439,17 @@ const IssuePanel = (): React.ReactElement => {
             <Stack space="space.075">
               <Heading size="xxsmall">Linked Confluence ADRs</Heading>
               {adrs.length === 0 ? (
-                <Text size="small" color="color.text.subtlest">
-                  No ADR guardrails were resolved for this issue. Link the governing Confluence
-                  page to the issue, or mention the issue key on the ADR page.
-                </Text>
+                <Stack space="space.075">
+                  <Text size="small" color="color.text.subtlest">
+                    No ADR guardrails were resolved for this issue. Link the governing Confluence
+                    page to the issue, or mention the issue key on the ADR page.
+                  </Text>
+                  {adrNote ? (
+                    <SectionMessage appearance="warning" title="Why no ADR loaded">
+                      <Text size="small">{adrNote}</Text>
+                    </SectionMessage>
+                  ) : null}
+                </Stack>
               ) : (
                 adrs.map((rule) => {
                   const style = ADR_STYLE[rule.status];

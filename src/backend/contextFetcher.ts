@@ -7,6 +7,7 @@ import type { RequestInit as ForgeRequestInit, Route } from '@forge/api';
 import { resolveCloudId } from './cloudId';
 import type { CloudIdResolution } from './cloudId';
 import { descriptionToText, extractAcceptanceCriteria, extractAdrRules } from './extract';
+import { loadCachedAdrPage, loadCachedAdrPageIds } from './storage';
 import type {
   ConfluenceAdrRule,
   GraphDependency,
@@ -64,8 +65,9 @@ async function requestJiraJson<T>(path: Route, init?: ForgeRequestInit): Promise
   } catch (userError) {
     const response = await api.asApp().requestJira(path, init);
     if (!response.ok) {
+      // `path` is a `Route` object, so interpolating it logged `[object Object]`.
       throw new Error(
-        `Jira request failed (${path}): user=${(userError as Error).message} app=${response.status}`,
+        `Jira request failed: user=${(userError as Error).message} app=HTTP ${response.status}`,
       );
     }
     return (await response.json()) as T;
@@ -80,8 +82,9 @@ async function requestConfluenceJson<T>(path: Route): Promise<T> {
   } catch (userError) {
     const response = await api.asApp().requestConfluence(path);
     if (!response.ok) {
+      // `path` is a `Route` object, so interpolating it logged `[object Object]`.
       throw new Error(
-        `Confluence request failed (${path}): user=${(userError as Error).message} app=${response.status}`,
+        `Confluence request failed: user=${(userError as Error).message} app=HTTP ${response.status}`,
       );
     }
     return (await response.json()) as T;
@@ -234,6 +237,14 @@ function confluencePageEndpoints(pageId: string): Route[] {
  * preferred; the v1 `expand=body.storage` endpoint is the fallback for older sites and
  * for app versions without v2 access.
  */
+/**
+ * A refusal that will not improve on retry. `api.asUser()` throws
+ * `Authentication Required` instead of returning a 401 response, so the message has to
+ * be classified too — otherwise a page that is refused for every identity is reported
+ * as a generic read failure.
+ */
+const AUTH_REFUSAL = /authentication required|unauthori[sz]ed|forbidden|needs_authentication|\b401\b|\b403\b/i;
+
 export async function fetchConfluencePage(pageId: string): Promise<ConfluencePagePayload> {
   const failures: string[] = [];
   // Cleared as soon as one attempt fails for a reason other than a 401/403 refusal,
@@ -251,8 +262,10 @@ export async function fetchConfluencePage(pageId: string): Promise<ConfluencePag
         failures.push(`${identity} HTTP ${response.status}`);
         if (response.status !== 401 && response.status !== 403) allRestricted = false;
       } catch (error) {
-        failures.push(`${identity} ${(error as Error).message}`);
-        allRestricted = false;
+        const message = (error as Error).message;
+        failures.push(`${identity} ${message}`);
+        // `Authentication Required` is a 401 by another name: keep the sharing guidance.
+        if (!AUTH_REFUSAL.test(message)) allRestricted = false;
       }
     }
   }
@@ -304,6 +317,8 @@ interface AdrDiscovery {
   rules: ConfluenceAdrRule[];
   /** Page IDs resolved from remote links / CQL, logged for `forge logs` diagnosis. */
   pageIds: string[];
+  /** Page IDs whose rules came from the KVS bridge because the live read failed. */
+  cachedPageIds: string[];
   warnings: string[];
 }
 
@@ -326,7 +341,21 @@ export async function fetchAdrRulesForPage(
   };
 }
 
-async function discoverAdrRules(
+/** Reads the ADR rules the Confluence byline cached for a page, tolerating a cold/absent store. */
+async function cachedRulesForPage(
+  pageId: string,
+  warnings: string[],
+): Promise<ConfluenceAdrRule[]> {
+  try {
+    const cached = await loadCachedAdrPage(pageId);
+    return cached?.rules ?? [];
+  } catch (error) {
+    warnings.push(`ADR cache unavailable for page ${pageId}: ${(error as Error).message}`);
+    return [];
+  }
+}
+
+export async function discoverAdrRules(
   issueKey: string,
   remoteLinks: RemoteLinkRef[],
 ): Promise<AdrDiscovery> {
@@ -334,6 +363,8 @@ async function discoverAdrRules(
   const rules: ConfluenceAdrRule[] = [];
   const pageIds = new Set<string>();
   const unresolvedTitles: string[] = [];
+  /** Pages whose rules came from the KVS bridge because the live read failed. */
+  const cachedPageIds = new Set<string>();
 
   for (const link of remoteLinks) {
     const id = pageIdFromRemoteLink(link);
@@ -376,18 +407,17 @@ async function discoverAdrRules(
   }
 
   for (const pageId of pageIds) {
+    let extracted: ConfluenceAdrRule[] = [];
     try {
       const page = await fetchConfluencePage(pageId);
       const pageUrl = page._links?.webui
         ? `${page._links.base ?? ''}${page._links.webui}`
         : undefined;
-      rules.push(
-        ...extractAdrRules(page.body?.storage?.value ?? '', {
-          pageId: page.id ?? pageId,
-          pageTitle: page.title ?? `Page ${pageId}`,
-          pageUrl,
-        }),
-      );
+      extracted = extractAdrRules(page.body?.storage?.value ?? '', {
+        pageId: page.id ?? pageId,
+        pageTitle: page.title ?? `Page ${pageId}`,
+        pageUrl,
+      });
     } catch (error) {
       // A restricted page already carries actionable, user-facing guidance.
       warnings.push(
@@ -396,13 +426,47 @@ async function discoverAdrRules(
           : `ADR page ${pageId} could not be read: ${(error as Error).message}`,
       );
     }
+
+    if (extracted.length > 0) {
+      rules.push(...extracted);
+      continue;
+    }
+
+    // The Confluence byline may have parsed this page while acting as the viewer whose
+    // session can read it; that cached rule survives a refused panel read.
+    const cached = await cachedRulesForPage(pageId, warnings);
+    if (cached.length === 0) continue;
+    rules.push(...cached);
+    cachedPageIds.add(pageId);
+    warnings.push(
+      `ADR page ${pageId} could not be read live, so ${cached.length} cached guardrail rule${cached.length === 1 ? '' : 's'} from the Confluence byline were used instead.`,
+    );
+  }
+
+  // Issue-level bridge: pages cached by the byline that no live link resolved.
+  let cachedIssuePages: string[] = [];
+  try {
+    cachedIssuePages = await loadCachedAdrPageIds(issueKey);
+  } catch (error) {
+    warnings.push(`ADR cache unavailable for ${issueKey}: ${(error as Error).message}`);
+  }
+
+  for (const pageId of cachedIssuePages) {
+    if (rules.some((rule) => rule.pageId === pageId)) continue;
+    const cached = await cachedRulesForPage(pageId, warnings);
+    if (cached.length === 0) continue;
+    rules.push(...cached);
+    cachedPageIds.add(pageId);
+    warnings.push(
+      `ADR page ${pageId} was not resolved from a live link, so ${cached.length} cached guardrail rule${cached.length === 1 ? '' : 's'} from the Confluence byline were used instead.`,
+    );
   }
 
   if (rules.length === 0) {
     warnings.push('No Confluence ADR guardrails were resolved for this issue.');
   }
 
-  return { rules, pageIds: [...pageIds], warnings };
+  return { rules, pageIds: [...pageIds], cachedPageIds: [...cachedPageIds], warnings };
 }
 
 export interface GraphTraversal {
@@ -586,6 +650,7 @@ export async function fetchContextBundle(
     issueKey,
     remoteLinkCount: remoteLinks.length,
     resolvedPageIds: adrDiscovery.pageIds,
+    cachedRulePageIds: adrDiscovery.cachedPageIds,
     hasCloudId: Boolean(resolution.cloudId),
     warnings: adrDiscovery.warnings,
   });

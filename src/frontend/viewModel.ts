@@ -76,6 +76,28 @@ export function graphDiagnosticNote(diagnostics: GraphDiagnostics | undefined): 
   return `Teamwork Graph connected (cloud ID from ${diagnostics.cloudIdSource}).`;
 }
 
+/** The catch-all warning: it adds nothing over the panel's own empty-state copy. */
+const GENERIC_ADR_WARNING = 'No Confluence ADR guardrails were resolved for this issue.';
+
+/**
+ * Why no ADR rule is listed, when the bundle carried an ADR-related warning (restricted
+ * page, HTTP failure, unresolved link). Returns the exact warning so the panel can show
+ * the same diagnostic `forge logs` reports, instead of a generic empty state.
+ */
+export function adrDiagnosticNote(
+  adrs: readonly unknown[],
+  warnings: readonly string[] | undefined,
+): string | null {
+  if (adrs.length > 0) return null;
+  const match = (warnings ?? []).find(
+    (warning) =>
+      typeof warning === 'string' &&
+      /adr|confluence/i.test(warning) &&
+      warning.trim() !== GENERIC_ADR_WARNING,
+  );
+  return match ?? null;
+}
+
 /** Guidance shown when no verification exists yet for the open issue. */
 export function unverifiedHint(bundleLoaded: boolean): string {
   return bundleLoaded
