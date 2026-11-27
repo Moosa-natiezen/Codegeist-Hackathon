@@ -10,7 +10,7 @@
  * "status unavailable" chip with Retry). It renders nothing only when the surface
  * is not attached to a Confluence page at all.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ForgeReconciler, {
   Box,
   Button,
@@ -26,6 +26,7 @@ import ForgeReconciler, {
 } from '@forge/react';
 import type { LozengeProps } from '@forge/react';
 import PanelBoundary from './PanelBoundary';
+import { cacheBylineAdrPage } from './clientAdrHydration';
 import { callResolver, errorMessage } from './resolverClient';
 import { useSurfaceContext } from './surfaceContext';
 import { absoluteUrl, governedChipLabel, shortVerdictLabel } from './viewModel';
@@ -73,16 +74,48 @@ const ConfluenceByline = (): React.ReactElement => {
   const [busy, setBusy] = useState<boolean>(false);
   const [reevaluation, setReevaluation] = useState<AdrReevaluation | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cacheNote, setCacheNote] = useState<string | null>(null);
+
+  // Browser-session fallback: the backend's own Confluence read is refused on some sites
+  // (HTTP 401 even with `read:confluence-content.all`), but the person viewing this page
+  // can read it. One attempt per page per byline session, so a refused page never loops.
+  const hydratedPages = useRef<Set<string>>(new Set());
+  const hydratePage = useCallback(
+    async (next: AdrBylineState): Promise<void> => {
+      if (!next.pageId || hydratedPages.current.has(next.pageId)) return;
+      hydratedPages.current.add(next.pageId);
+      try {
+        const cached = await cacheBylineAdrPage({
+          pageId: next.pageId,
+          issueKey: next.issues[0]?.key,
+          cloudId: surface.cloudId ?? undefined,
+        });
+        if (cached.ruleCount > 0) {
+          setCacheNote(
+            `Cached ${cached.ruleCount} ADR rule${cached.ruleCount === 1 ? '' : 's'} from this page in your browser session.`,
+          );
+        }
+      } catch (hydrationError) {
+        // The backend cache attempt already logged its refusal; this is best effort.
+        console.warn(
+          '[specguard] byline ADR cache skipped:',
+          errorMessage(hydrationError),
+        );
+      }
+    },
+    [surface.cloudId],
+  );
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
+    setCacheNote(null);
     try {
-      setState(
-        await callResolver<AdrBylineState>('getAdrGovernanceState', {
-          cloudId: surface.cloudId ?? undefined,
-        }),
-      );
+      const next = await callResolver<AdrBylineState>('getAdrGovernanceState', {
+        cloudId: surface.cloudId ?? undefined,
+      });
+      setState(next);
       setFailed(false);
+      void hydratePage(next);
     } catch {
       // The failure is logged for forge logs; the chip stays visible but neutral.
       console.error('SpecGuard byline could not load ADR governance state.');
@@ -90,7 +123,7 @@ const ConfluenceByline = (): React.ReactElement => {
     } finally {
       setLoading(false);
     }
-  }, [surface.cloudId]);
+  }, [hydratePage, surface.cloudId]);
 
   useEffect(() => {
     void load();
@@ -213,6 +246,12 @@ const ConfluenceByline = (): React.ReactElement => {
             {state.governedCount > state.issues.length ? (
               <Text size="small" color="color.text.subtlest">
                 {`Showing the ${state.issues.length} most recent of ${state.governedCount} governed issues.`}
+              </Text>
+            ) : null}
+
+            {cacheNote ? (
+              <Text size="small" color="color.text.subtlest">
+                {cacheNote}
               </Text>
             ) : null}
 

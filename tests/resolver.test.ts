@@ -85,6 +85,7 @@ vi.mock('../src/backend/contextFetcher', () => ({
 }));
 
 const {
+  cacheClientAdrPage,
   getAdrGovernanceState,
   getIssueSpecState,
   ingestClientAdrPage,
@@ -363,6 +364,58 @@ describe('confluence byline resolver', () => {
     const reevaluated = await reevaluateGovernedIssues({ context: pageContext });
     expect(reevaluated.changedIssues).toEqual([]);
     expect(reevaluated.needsReReview).toBe(false);
+  });
+});
+
+describe('client ADR cache resolver (Confluence byline)', () => {
+  const bylinePage = {
+    pageId: '5472258',
+    title: 'Stateless JWT Auth & Edge Caching Policy',
+    url: '/wiki/spaces/ARCH/pages/5472258',
+    storageHtml: adrStorageHtml,
+  };
+
+  beforeEach(() => {
+    forgeMocks.store.clear();
+  });
+
+  it('caches the byline page rules without a governed Jira issue', async () => {
+    const result = await cacheClientAdrPage({ context: pageContext, payload: bylinePage });
+
+    expect(result).toMatchObject({
+      pageId: '5472258',
+      pageTitle: bylinePage.title,
+      ruleCount: 2,
+    });
+    const cached = forgeMocks.store.get('specguard:adr:5472258:cached_rule') as {
+      rules: ConfluenceAdrRule[];
+    };
+    expect(cached.rules.map((rule) => rule.kind)).toEqual(['Decision', 'Must Not']);
+    expect(cached.rules.map((rule) => rule.text)).toEqual([
+      'Adopt stateless JWTs with a 15 minute TTL.',
+      'Store refresh tokens in localStorage.',
+    ]);
+  });
+
+  it('rejects a non-numeric page id and an empty page body', async () => {
+    await expect(
+      cacheClientAdrPage({ context: pageContext, payload: { ...bylinePage, pageId: 'ADR-014' } }),
+    ).rejects.toThrow('A numeric Confluence page ID is required.');
+
+    await expect(
+      cacheClientAdrPage({ context: pageContext, payload: { ...bylinePage, storageHtml: ' ' } }),
+    ).rejects.toThrow('returned an empty body');
+  });
+
+  it('reports zero rules and leaves the cache empty for a page with no rules', async () => {
+    const result = await cacheClientAdrPage({
+      context: pageContext,
+      payload: { ...bylinePage, storageHtml: '<p>Just prose about edge caching.</p>' },
+    });
+
+    expect(result.ruleCount).toBe(0);
+    expect(result.cachedAt).toBeNull();
+    expect(forgeMocks.store.get('specguard:adr:5472258:cached_rule')).toBeUndefined();
   });
 });
 

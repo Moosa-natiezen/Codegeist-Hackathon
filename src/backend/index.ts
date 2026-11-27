@@ -37,6 +37,7 @@ import type {
   AdrBylineIssue,
   AdrBylineState,
   AdrReevaluation,
+  ClientAdrCacheResult,
   ClientAdrPagePayload,
   GuardrailCheckPayload,
   GuardrailCheckResponse,
@@ -180,6 +181,33 @@ export async function getIssueSpecState({
   );
 }
 
+interface ClientAdrPage {
+  pageId: string;
+  pageTitle: string;
+  pageUrl?: string;
+  storageHtml: string;
+}
+
+/** Validates a page body posted from the browser: numeric page ID, non-empty storage HTML. */
+function clientAdrPageFrom(payload: ClientAdrPagePayload | undefined): ClientAdrPage {
+  const pageId = String(payload?.pageId ?? '').trim();
+  if (!/^\d+$/.test(pageId)) {
+    throw new Error('A numeric Confluence page ID is required.');
+  }
+  const storageHtml = typeof payload?.storageHtml === 'string' ? payload.storageHtml : '';
+  if (storageHtml.trim().length === 0) {
+    throw new Error(
+      `Confluence page ${pageId} returned an empty body, so no ADR rules could be extracted.`,
+    );
+  }
+  return {
+    pageId,
+    pageTitle: payload?.title?.trim() || pageId,
+    pageUrl: payload?.url?.trim() || undefined,
+    storageHtml,
+  };
+}
+
 /**
  * Browser-session fallback for ADR resolution. When site/space settings refuse the
  * backend's `asApp()` read (HTTP 401 even with `read:confluence-content.all`), the panel
@@ -194,20 +222,8 @@ export async function ingestClientAdrPage({
   context,
   payload,
 }: ResolverRequest<ClientAdrPagePayload>): Promise<PanelIssueState> {
-  const pageId = String(payload?.pageId ?? '').trim();
-  if (!/^\d+$/.test(pageId)) {
-    throw new Error('A numeric Confluence page ID is required.');
-  }
-  const storageHtml = typeof payload?.storageHtml === 'string' ? payload.storageHtml : '';
-  if (storageHtml.trim().length === 0) {
-    throw new Error(
-      `Confluence page ${pageId} returned an empty body, so no ADR rules could be extracted.`,
-    );
-  }
-
+  const { pageId, pageTitle, pageUrl, storageHtml } = clientAdrPageFrom(payload);
   const issueKey = payload?.issueKey?.trim() || issueKeyFrom(context);
-  const pageTitle = payload?.title?.trim() || pageId;
-  const pageUrl = payload?.url?.trim() || undefined;
 
   const rules = extractAdrRules(storageHtml, { pageId, pageTitle, pageUrl });
   const cached = await cacheAdrRules(pageId, pageTitle, rules, [issueKey], pageUrl);
@@ -249,6 +265,36 @@ export async function ingestClientAdrPage({
       warnings,
     );
   }
+}
+
+/**
+ * Browser-session ADR cache for the Confluence byline: opening SpecGuard on an ADR page
+ * guarantees its Decision / Must / Must Not rules reach KVS even when the page has no
+ * governed Jira issue yet (the Jira panel path is `ingestClientAdrPage`).
+ */
+export async function cacheClientAdrPage({
+  payload,
+}: ResolverRequest<ClientAdrPagePayload>): Promise<ClientAdrCacheResult> {
+  const page = clientAdrPageFrom(payload);
+  const rules = extractAdrRules(page.storageHtml, {
+    pageId: page.pageId,
+    pageTitle: page.pageTitle,
+    pageUrl: page.pageUrl,
+  });
+  const cached = await cacheAdrRules(page.pageId, page.pageTitle, rules, [], page.pageUrl);
+  console.log('[specguard] adr client cache:', {
+    pageId: page.pageId,
+    ruleCount: rules.length,
+    issueKeys: cached?.issueKeys ?? [],
+  });
+
+  return {
+    pageId: page.pageId,
+    pageTitle: page.pageTitle,
+    ruleCount: rules.length,
+    issueKeys: cached?.issueKeys ?? [],
+    cachedAt: cached?.cachedAt ?? null,
+  };
 }
 
 /**
@@ -521,6 +567,7 @@ export function createResolver(): Resolver {
 
   resolver.define('getIssueSpecState', getIssueSpecState);
   resolver.define('ingestClientAdrPage', ingestClientAdrPage);
+  resolver.define('cacheClientAdrPage', cacheClientAdrPage);
   resolver.define('runGuardrailCheck', runGuardrailCheck);
   resolver.define('syncVerificationToJira', syncVerificationToJira);
   resolver.define('getAdrGovernanceState', getAdrGovernanceState);

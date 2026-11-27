@@ -129,6 +129,12 @@ const IssuePanel = (): React.ReactElement => {
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [showAllAudit, setShowAllAudit] = useState<boolean>(false);
 
+  // Browser-session ADR hydration state: a refused page (no consent yet, page still
+  // restricted) becomes an inline note with an explicit retry inside the ADR block.
+  const hydratedPages = useRef<Set<string>>(new Set());
+  const [hydrating, setHydrating] = useState<boolean>(false);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
+
   // `refreshContext` asks the resolver for a live fetch (mount, Refresh, Retry) so the
   // criteria and ADRs appear without pressing "Get context".
   const load = useCallback(
@@ -157,39 +163,53 @@ const IssuePanel = (): React.ReactElement => {
 
   // Browser-session fallback: when the backend's `asApp()` Confluence read is refused,
   // read the linked ADR page with the viewer's own session and ingest it so the rules
-  // appear here (and are cached in KVS for Rovo and the MCP tools). Each page is tried
-  // once per panel session, so a refused page never loops.
-  const hydratedPages = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!panel || loading) return undefined;
-    if ((panel.result?.adrs.length ?? 0) > 0) return undefined;
-    if ((panel.bundle?.adrs.length ?? 0) > 0) return undefined;
-
-    const pageIds = adrCandidatePageIds(panel).filter(
-      (pageId) => !hydratedPages.current.has(pageId),
-    );
-    if (pageIds.length === 0) return undefined;
-    for (const pageId of pageIds) hydratedPages.current.add(pageId);
-
-    let cancelled = false;
-    void (async () => {
+  // appear here (and are cached in KVS for Rovo and the MCP tools).
+  const syncFromBrowser = useCallback(
+    async (pageIds: string[]): Promise<void> => {
+      if (!panel || pageIds.length === 0) return;
+      setHydrating(true);
+      setHydrationError(null);
       try {
         const updated = await hydrateAdrRulesFromBrowser({
           issueKey: panel.issueKey,
           pageIds,
           cloudId: surface.cloudId ?? undefined,
         });
-        if (!cancelled && updated) setPanel(updated);
-      } catch (hydrationError) {
-        // The backend warnings already explain the refusal; hydration is best effort.
-        console.warn('[specguard] browser ADR hydration skipped:', errorMessage(hydrationError));
+        if (updated) setPanel(updated);
+      } catch (hydrationFailure) {
+        // The backend warnings already explain the refusal; hydration is best effort but
+        // the viewer can retry once they have granted Confluence access.
+        const message = errorMessage(hydrationFailure);
+        console.warn('[specguard] browser ADR hydration skipped:', message);
+        setHydrationError(message);
+      } finally {
+        setHydrating(false);
       }
-    })();
+    },
+    [panel, surface.cloudId],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [loading, panel, surface.cloudId]);
+  // Each page is tried once per panel session, so a refused page never loops.
+  useEffect(() => {
+    if (!panel || loading) return;
+    if ((panel.result?.adrs.length ?? 0) > 0) return;
+    if ((panel.bundle?.adrs.length ?? 0) > 0) return;
+
+    const pageIds = adrCandidatePageIds(panel).filter(
+      (pageId) => !hydratedPages.current.has(pageId),
+    );
+    if (pageIds.length === 0) return;
+    for (const pageId of pageIds) hydratedPages.current.add(pageId);
+
+    void syncFromBrowser(pageIds);
+  }, [loading, panel, syncFromBrowser]);
+
+  const retryHydration = useCallback((): void => {
+    if (!panel) return;
+    const pageIds = adrCandidatePageIds(panel);
+    for (const pageId of pageIds) hydratedPages.current.delete(pageId);
+    void syncFromBrowser(pageIds);
+  }, [panel, syncFromBrowser]);
 
   const runCheck = useCallback(
     async (mode: 'context' | 'verify'): Promise<void> => {
@@ -514,6 +534,30 @@ const IssuePanel = (): React.ReactElement => {
               <Text size="small" color="color.text.subtlest">
                 35% of score
               </Text>
+
+              {hydrationError ? (
+                <Stack space="space.050">
+                  <Text size="small" color="color.text.subtlest">
+                    {`Confluence sync needs your browser session: ${hydrationError}`}
+                  </Text>
+                  <Inline>
+                    <Button
+                      appearance="subtle"
+                      isDisabled={hydrating}
+                      onClick={retryHydration}
+                    >
+                      {hydrating ? 'Syncing…' : 'Retry Confluence Sync'}
+                    </Button>
+                  </Inline>
+                </Stack>
+              ) : hydrating ? (
+                <Inline space="space.050" alignBlock="center" shouldWrap>
+                  <Spinner size="small" label="Reading the ADR page in your browser" />
+                  <Text size="small" color="color.text.subtlest">
+                    Reading the ADR page in your browser session…
+                  </Text>
+                </Inline>
+              ) : null}
             </Stack>
 
             {/* 5 — Dependency impact */}

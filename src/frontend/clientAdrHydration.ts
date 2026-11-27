@@ -11,7 +11,11 @@
  */
 import { requestConfluence } from '@forge/bridge';
 import { callResolver } from './resolverClient';
-import type { ClientAdrPagePayload, PanelIssueState } from '../backend/viewTypes';
+import type {
+  ClientAdrCacheResult,
+  ClientAdrPagePayload,
+  PanelIssueState,
+} from '../backend/viewTypes';
 
 /** One page body read in the browser, plus what the panel knows about it. */
 export interface ClientAdrPageBody {
@@ -101,6 +105,53 @@ export async function readClientAdrPage(pageId: string): Promise<ClientAdrPageBo
   throw new Error(
     `Confluence page ${pageId} could not be read in your browser session (${lastError}).`,
   );
+}
+
+/**
+ * Confluence byline fallback: reads the page the byline is on with the viewer's session
+ * and caches its rules. A page that already governs a Jira issue also refreshes that
+ * issue's panel state (`ingestClientAdrPage`); a page with no governed issue is cached
+ * on its own (`cacheClientAdrPage`), so opening the byline is always enough.
+ */
+export async function cacheBylineAdrPage(options: {
+  pageId: string;
+  issueKey?: string;
+  cloudId?: string;
+  readPage?: (pageId: string) => Promise<ClientAdrPageBody>;
+  ingest?: (payload: ClientAdrPagePayload) => Promise<PanelIssueState>;
+  cache?: (payload: ClientAdrPagePayload) => Promise<ClientAdrCacheResult>;
+}): Promise<ClientAdrCacheResult> {
+  const readPage = options.readPage ?? readClientAdrPage;
+  const body = await readPage(options.pageId);
+  const payload: ClientAdrPagePayload = {
+    pageId: options.pageId,
+    title: body.title,
+    url: body.url,
+    storageHtml: body.storageHtml,
+    cloudId: options.cloudId,
+  };
+
+  if (!options.issueKey) {
+    const cache =
+      options.cache ??
+      ((request: ClientAdrPagePayload) =>
+        callResolver<ClientAdrCacheResult>('cacheClientAdrPage', request));
+    return cache(payload);
+  }
+
+  const ingest =
+    options.ingest ??
+    ((request: ClientAdrPagePayload) =>
+      callResolver<PanelIssueState>('ingestClientAdrPage', request));
+  const state = await ingest({ ...payload, issueKey: options.issueKey });
+  const pageRules = (state.bundle?.adrs ?? []).filter((rule) => rule.pageId === options.pageId);
+  return {
+    pageId: options.pageId,
+    pageTitle: body.title ?? options.pageId,
+    ruleCount: pageRules.length,
+    issueKeys: [options.issueKey],
+    cachedAt: null,
+  };
 }
 
 /**

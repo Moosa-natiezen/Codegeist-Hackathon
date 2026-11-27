@@ -41,6 +41,20 @@ export interface ClientAdrPagePayload {
   cloudId?: string;
 }
 
+/**
+ * `cacheClientAdrPage` — what a page body read in the browser added to the KVS cache.
+ * The Confluence byline uses this when the page has no governed Jira issue yet, so its
+ * rules are cached without refreshing a panel state that does not exist.
+ */
+export interface ClientAdrCacheResult {
+  pageId: string;
+  pageTitle: string;
+  ruleCount: number;
+  /** Issues the rules were cached for (linked keys plus keys named in the rule text). */
+  issueKeys: string[];
+  cachedAt: string | null;
+}
+
 /** `runGuardrailCheck` — a context fetch (`mode: 'context'`) or a scored verification. */
 export interface GuardrailCheckPayload {
   mode?: 'context' | 'verify';

@@ -164,6 +164,16 @@ output: PanelIssueState   // same shape as getIssueSpecState
 
 The handler extracts rules with the byline's `extractAdrRules`, caches them in the KVS keys above, then re-fetches the context so the returned bundle already contains the hydrated ADR rules. `PanelIssueState.resolvedPageIds` (mirrored from `bundle.resolvedPageIds`) tells the panel which linked pages it may hydrate.
 
+The Confluence byline uses the same browser read so opening SpecGuard on an ADR page always caches its rules:
+
+```ts
+// cacheClientAdrPage — byline path, no Jira panel state to refresh
+input : { pageId: string, storageHtml: string, title?: string, url?: string }
+output: { pageId, pageTitle, ruleCount, issueKeys: string[], cachedAt: string | null }
+```
+
+Both resolvers expose the identical extraction + `cacheAdrRules` behaviour; only `ingestClientAdrPage` takes an issue key and re-fetches the scoreable bundle. The byline calls `ingestClientAdrPage` when the page already governs a Jira issue, otherwise `cacheClientAdrPage`, once per page per byline session. The Jira panel reacts to a failed browser read (for example before Confluence consent is granted) with an inline note and a **Retry Confluence Sync** button inside *Linked Confluence ADRs*.
+
 ---
 
 ## 6. Required scopes
