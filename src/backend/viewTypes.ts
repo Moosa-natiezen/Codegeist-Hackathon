@@ -35,7 +35,13 @@ export interface ClientAdrPagePayload {
   title?: string;
   url?: string;
   /** Storage-format HTML (`body.storage.value`) exactly as Confluence returned it. */
-  storageHtml: string;
+  storageHtml?: string;
+  /**
+   * Plain/markdown ADR rules the viewer pasted (`Decision: … / Must: … / Must Not: …`).
+   * Used instead of `storageHtml` when the page cannot be read at all; each non-empty
+   * line becomes its own paragraph before `extractAdrRules` runs.
+   */
+  rawText?: string;
   /** Resolver context carries the issue key; the panel also forwards it explicitly. */
   issueKey?: string;
   cloudId?: string;

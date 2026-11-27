@@ -516,6 +516,67 @@ describe('client ADR hydration resolver', () => {
     ).rejects.toThrow('returned an empty body');
   });
 
+  it('accepts plain ADR text instead of a page body and caches the rules', async () => {
+    const state = await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: {
+        issueKey: 'CLSD-6',
+        pageId: '5603635',
+        title: 'Manually pasted ADR rules',
+        rawText: [
+          'Decision: Adopt stateless JWTs with a 15 minute TTL.',
+          'Must: Rotate signing keys every 90 days.',
+          'Must Not: Store refresh tokens in localStorage.',
+        ].join('\n'),
+      },
+    });
+
+    const cached = forgeMocks.store.get('specguard:adr:5603635:cached_rule') as {
+      pageTitle: string;
+      rules: ConfluenceAdrRule[];
+      issueKeys: string[];
+    };
+    expect(cached.pageTitle).toBe('Manually pasted ADR rules');
+    expect(cached.rules.map((rule) => rule.kind)).toEqual(['Decision', 'Must', 'Must Not']);
+    expect(cached.rules.map((rule) => rule.text)).toEqual([
+      'Adopt stateless JWTs with a 15 minute TTL.',
+      'Rotate signing keys every 90 days.',
+      'Store refresh tokens in localStorage.',
+    ]);
+    expect(cached.issueKeys).toContain('CLSD-6');
+    expect(forgeMocks.store.get('specguard:issue:CLSD-6:cached_adrs')).toMatchObject({
+      pageIds: ['5603635'],
+    });
+
+    expect(state.bundle?.adrs.map((rule) => rule.kind)).toEqual([
+      'Decision',
+      'Must',
+      'Must Not',
+    ]);
+  });
+
+  it('accepts a manual label when the issue links no page id', async () => {
+    await ingestClientAdrPage({
+      context: restrictedContext,
+      payload: {
+        issueKey: 'CLSD-6',
+        pageId: 'manual-adr',
+        rawText: 'Must: Rotate signing keys every 90 days.',
+      },
+    });
+
+    const cached = forgeMocks.store.get('specguard:adr:manual-adr:cached_rule') as {
+      pageTitle: string;
+      rules: ConfluenceAdrRule[];
+      issueKeys: string[];
+    };
+    expect(cached.pageTitle).toBe('Manually pasted ADR rules');
+    expect(cached.rules).toMatchObject([
+      { kind: 'Must', text: 'Rotate signing keys every 90 days.' },
+    ]);
+    expect(cached.issueKeys).toContain('CLSD-6');
+  });
+
   it('keeps the cached rules when the ingested page carries no recognisable rules', async () => {
     await ingestClientAdrPage({
       context: restrictedContext,

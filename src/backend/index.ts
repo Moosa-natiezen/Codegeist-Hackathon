@@ -186,25 +186,77 @@ interface ClientAdrPage {
   pageTitle: string;
   pageUrl?: string;
   storageHtml: string;
+  /** True when the body was pasted as text rather than read from a Confluence page. */
+  manual: boolean;
 }
 
-/** Validates a page body posted from the browser: numeric page ID, non-empty storage HTML. */
+const MANUAL_ADR_PAGE_ID = 'manual-adr';
+const MANUAL_ADR_TITLE = 'Manually pasted ADR rules';
+
+/** Escapes the characters that would otherwise be read as storage-format markup. */
+function escapeStorageText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Turns pasted plain/markdown ADR text into storage-format paragraphs, so a page nobody
+ * can read still goes through the same `extractAdrRules` path as a real page body.
+ * One non-empty line per `<p>`, so `Decision: … / Must: … / Must Not: …` stays one rule each.
+ */
+function storageHtmlFromAdrText(rawText: string): string {
+  return rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => `<p>${escapeStorageText(line)}</p>`)
+    .join('\n');
+}
+
+/**
+ * Validates a page body posted from the browser: numeric page ID, non-empty storage HTML.
+ *
+ * `rawText` (plain/markdown ADR rules pasted in the panel) is an accepted alternative to
+ * `storageHtml` for issues whose linked page is unreadable. A pasted body may carry a
+ * manual label instead of a page ID when the issue links no page at all — there is no
+ * page to name — which keeps the KVS keys `specguard:adr:<label>:cached_rule` valid.
+ */
 function clientAdrPageFrom(payload: ClientAdrPagePayload | undefined): ClientAdrPage {
-  const pageId = String(payload?.pageId ?? '').trim();
-  if (!/^\d+$/.test(pageId)) {
+  const rawText = typeof payload?.rawText === 'string' ? payload.rawText : '';
+  const manual = rawText.trim().length > 0;
+  const requestedId = String(payload?.pageId ?? '').trim();
+
+  let pageId = requestedId;
+  if (manual && !/^\d+$/.test(requestedId)) {
+    pageId = requestedId
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 64);
+  }
+  if (pageId.length === 0) pageId = manual ? MANUAL_ADR_PAGE_ID : '';
+  if (!/^\d+$/.test(pageId) && !manual) {
     throw new Error('A numeric Confluence page ID is required.');
   }
-  const storageHtml = typeof payload?.storageHtml === 'string' ? payload.storageHtml : '';
+
+  const providedHtml = typeof payload?.storageHtml === 'string' ? payload.storageHtml : '';
+  const storageHtml =
+    providedHtml.trim().length > 0
+      ? providedHtml
+      : manual
+        ? storageHtmlFromAdrText(rawText)
+        : '';
   if (storageHtml.trim().length === 0) {
     throw new Error(
       `Confluence page ${pageId} returned an empty body, so no ADR rules could be extracted.`,
     );
   }
+
   return {
     pageId,
-    pageTitle: payload?.title?.trim() || pageId,
+    pageTitle: payload?.title?.trim() || (manual ? MANUAL_ADR_TITLE : pageId),
     pageUrl: payload?.url?.trim() || undefined,
     storageHtml,
+    manual,
   };
 }
 
@@ -212,6 +264,7 @@ function clientAdrPageFrom(payload: ClientAdrPagePayload | undefined): ClientAdr
  * Browser-session fallback for ADR resolution. When site/space settings refuse the
  * backend's `asApp()` read (HTTP 401 even with `read:confluence-content.all`), the panel
  * reads the page with the signed-in viewer's own session and posts the storage HTML here.
+ * The panel may instead post `rawText` the viewer pasted, for a page nobody can read yet.
  *
  * The body is parsed with the same `extractAdrRules` the byline uses, cached in KVS
  * (`specguard:adr:<pageId>:cached_rule` + `specguard:issue:<issueKey>:cached_adrs`) so the
@@ -222,7 +275,7 @@ export async function ingestClientAdrPage({
   context,
   payload,
 }: ResolverRequest<ClientAdrPagePayload>): Promise<PanelIssueState> {
-  const { pageId, pageTitle, pageUrl, storageHtml } = clientAdrPageFrom(payload);
+  const { pageId, pageTitle, pageUrl, storageHtml, manual } = clientAdrPageFrom(payload);
   const issueKey = payload?.issueKey?.trim() || issueKeyFrom(context);
 
   const rules = extractAdrRules(storageHtml, { pageId, pageTitle, pageUrl });
@@ -230,6 +283,7 @@ export async function ingestClientAdrPage({
   console.log('[specguard] adr client ingest:', {
     issueKey,
     pageId,
+    source: manual ? 'manual-text' : 'browser',
     ruleCount: rules.length,
     cachedIssueKeys: cached?.issueKeys ?? [],
   });
@@ -237,7 +291,9 @@ export async function ingestClientAdrPage({
   const warnings: string[] = [];
   if (rules.length === 0) {
     warnings.push(
-      `No Decision, Must or Must Not rules were found in Confluence page ${pageId}, so nothing was cached.`,
+      `No Decision, Must or Must Not rules were found in ${
+        manual ? 'the pasted ADR text' : `Confluence page ${pageId}`
+      }, so nothing was cached.`,
     );
   }
 

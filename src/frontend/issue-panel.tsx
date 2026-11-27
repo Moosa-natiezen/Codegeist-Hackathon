@@ -135,6 +135,13 @@ const IssuePanel = (): React.ReactElement => {
   const [hydrating, setHydrating] = useState<boolean>(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
 
+  // Direct paste fallback: a space the viewer cannot open at all has no readable body,
+  // so the ADR rules can still be typed in and cached for this issue.
+  const [showManualAdr, setShowManualAdr] = useState<boolean>(false);
+  const [manualAdrText, setManualAdrText] = useState<string>('');
+  const [savingManualAdr, setSavingManualAdr] = useState<boolean>(false);
+  const [manualAdrError, setManualAdrError] = useState<string | null>(null);
+
   // `refreshContext` asks the resolver for a live fetch (mount, Refresh, Retry) so the
   // criteria and ADRs appear without pressing "Get context".
   const load = useCallback(
@@ -210,6 +217,37 @@ const IssuePanel = (): React.ReactElement => {
     for (const pageId of pageIds) hydratedPages.current.delete(pageId);
     void syncFromBrowser(pageIds);
   }, [panel, syncFromBrowser]);
+
+  // Pasted rules go through the same resolver as a browser read: extraction + KVS cache,
+  // so the panel, Rovo and the MCP tools all see them. Uses the linked page ID when the
+  // issue has one, otherwise the `manual-adr` label.
+  const saveManualAdr = useCallback(async (): Promise<void> => {
+    if (!panel || manualAdrText.trim().length === 0) return;
+    const linkedPageId = (panel.resolvedPageIds ?? [])
+      .map((pageId) => String(pageId ?? '').trim())
+      .find((pageId) => /^\d+$/.test(pageId));
+
+    setSavingManualAdr(true);
+    setManualAdrError(null);
+    try {
+      setPanel(
+        await callResolver<PanelIssueState>('ingestClientAdrPage', {
+          issueKey: panel.issueKey,
+          pageId: linkedPageId ?? 'manual-adr',
+          title: 'Manually pasted ADR rules',
+          rawText: manualAdrText,
+          cloudId: surface.cloudId ?? undefined,
+        }),
+      );
+      setManualAdrText('');
+      setShowManualAdr(false);
+      setHydrationError(null);
+    } catch (saveError) {
+      setManualAdrError(errorMessage(saveError));
+    } finally {
+      setSavingManualAdr(false);
+    }
+  }, [manualAdrText, panel, surface.cloudId]);
 
   const runCheck = useCallback(
     async (mode: 'context' | 'verify'): Promise<void> => {
@@ -505,6 +543,47 @@ const IssuePanel = (): React.ReactElement => {
                     <SectionMessage appearance="warning" title="Why no ADR loaded">
                       <Text size="small">{adrNote}</Text>
                     </SectionMessage>
+                  ) : null}
+
+                  <Inline>
+                    <Button
+                      appearance="subtle"
+                      isDisabled={savingManualAdr}
+                      onClick={() => setShowManualAdr((current) => !current)}
+                    >
+                      {showManualAdr ? 'Hide manual ADR paste' : 'Paste ADR text manually'}
+                    </Button>
+                  </Inline>
+
+                  {showManualAdr ? (
+                    <Stack space="space.075">
+                      <TextArea
+                        placeholder={'Decision: …\nMust: …\nMust Not: …'}
+                        value={manualAdrText}
+                        minimumRows={4}
+                        onChange={(event) => setManualAdrText(String(event.target.value ?? ''))}
+                      />
+                      <Text size="small" color="color.text.subtlest">
+                        One rule per line. The rules are cached for this issue, so Rovo and the MCP
+                        tools read them too.
+                      </Text>
+                      {manualAdrError ? (
+                        <Text size="small" color="color.text.subtlest">
+                          {`ADR rules could not be saved: ${manualAdrError}`}
+                        </Text>
+                      ) : null}
+                      <Inline>
+                        <Button
+                          appearance="primary"
+                          isDisabled={
+                            savingManualAdr || manualAdrText.trim().length === 0
+                          }
+                          onClick={() => void saveManualAdr()}
+                        >
+                          {savingManualAdr ? 'Saving…' : 'Save ADR Rules'}
+                        </Button>
+                      </Inline>
+                    </Stack>
                   ) : null}
                 </Stack>
               ) : (

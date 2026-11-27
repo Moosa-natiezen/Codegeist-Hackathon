@@ -157,12 +157,14 @@ Some sites refuse the app's own Confluence identity (`asUser` → `Authenticatio
 
 ```ts
 // ingestClientAdrPage
-input : { pageId: string, storageHtml: string, title?: string, url?: string,
-          issueKey?: string, cloudId?: string }
+input : { pageId: string, storageHtml?: string, rawText?: string, title?: string,
+          url?: string, issueKey?: string, cloudId?: string }
 output: PanelIssueState   // same shape as getIssueSpecState
 ```
 
-The handler extracts rules with the byline's `extractAdrRules`, caches them in the KVS keys above, then re-fetches the context so the returned bundle already contains the hydrated ADR rules. `PanelIssueState.resolvedPageIds` (mirrored from `bundle.resolvedPageIds`) tells the panel which linked pages it may hydrate.
+The handler extracts rules with the byline's `extractAdrRules`, caches them in the KVS keys above, then re-fetches the context so the returned bundle already contains the hydrated ADR rules.
+
+`rawText` is the direct-paste fallback: when even the viewer's session cannot read the page (a restricted space they cannot open), the panel's *Paste ADR text manually* control posts `Decision: … / Must: … / Must Not: …` lines instead of a body. Each non-empty line is wrapped in its own `<p>` (with `&`, `<`, `>` escaped) before extraction, so the pasted text travels the exact same parse-and-cache path as a real page. A paste may use a manual label (`manual-adr`) as `pageId` when the issue links no page, which keeps `specguard:adr:<pageId>:cached_rule` valid. `PanelIssueState.resolvedPageIds` (mirrored from `bundle.resolvedPageIds`) tells the panel which linked pages it may hydrate.
 
 The Confluence byline uses the same browser read so opening SpecGuard on an ADR page always caches its rules:
 
